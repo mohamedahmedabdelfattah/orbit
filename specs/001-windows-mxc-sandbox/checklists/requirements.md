@@ -19,7 +19,7 @@
 - [x] Success criteria are technology-agnostic (no implementation details in SC1–SC7)
 - [x] All acceptance scenarios defined (8 user stories with acceptance criteria + 6 edge cases)
 - [x] Edge cases are identified (partial WSL state, MXC flapping, mode switch, shared machines, STAFFROOM_HOME relocation)
-- [x] Scope is clearly bounded (Out of Scope lists 6 exclusions)
+- [x] Scope is clearly bounded (Out of Scope lists 7 exclusions)
 - [x] Dependencies and assumptions identified (MXC version, consumption mode, telemetry, whole-agent containment reviewed and rejected — owner decision 2026-11-04)
 
 ## Feature Readiness

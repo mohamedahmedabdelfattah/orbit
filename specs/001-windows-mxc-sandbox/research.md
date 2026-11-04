@@ -20,12 +20,12 @@ Feature: `001-windows-mxc-sandbox`. Each entry: Decision, Rationale, Alternative
 
 ## D2 — Policy translation (Orbit → MXC, per shell command)
 
-**Decision**: a single Orbit-side translation of the existing policy model, produced **per contained command**:
+**Decision**: a single Orbit-side translation of the existing policy model, produced **per contained command**. Field names in the right column follow `contracts/mxc-request.md` (Orbit's canonical mapping); the actual MXC stable-schema field names are verified at implementation time (T020's artifact verification).
 
 | Orbit policy surface (from `engine.settings_json()`) | MXC request field (stable schema) |
 | --- | --- |
-| `filesystem.denyRead` = `SECRET_PATHS` | `filesystem.denyRead` with **Windows-native paths** (`%USERPROFILE%\.ssh`, `%USERPROFILE%\.aws`, `%APPDATA%\gnupg`, `%APPDATA%\rclone`, `.netrc`, Chrome/Edge cookie & password stores, Desktop/Documents/Downloads, Orbit's secrets folder) |
-| `filesystem.allowWrite` = team tree | `filesystem.allowWrite` = employee workspace + team tree + per-command temp |
+| `filesystem.denyRead` = `SECRET_PATHS` | `filesystem.deny_read` with **Windows-native paths** (`%USERPROFILE%\.ssh`, `%USERPROFILE%\.aws`, `%APPDATA%\gnupg`, `%APPDATA%\rclone`, `.netrc`, Chrome/Edge cookie & password stores, Desktop/Documents/Downloads, Orbit's secrets folder) |
+| `filesystem.allowWrite` = team tree | `filesystem.allow_write` = employee workspace + team tree + per-command temp |
 | `network.allowedDomains` = pypi/pythonhosted + owner domains (+ gateway needs, `strictAllowlist` per autonomy) | `network.egress default: deny` + allowed destinations; backend host filtering where supported |
 | `excludedCommands` (gateway commands run outside the sandbox with their own limits) | The hook passes gateway commands through unwrapped (they enforce their own limits) — Orbit replicates the exclusion matcher per command |
 | `failIfUnavailable: true` | At the hook layer: a failed wrapper build/launch denies the command with the reason (fail-closed per command). At run level: Orbit omits sandbox `failIfUnavailable` from the settings blob on native Windows (the built-in sandbox doesn't exist there) so the agent starts normally |
@@ -64,7 +64,7 @@ Feature: `001-windows-mxc-sandbox`. Each entry: Decision, Rationale, Alternative
 ## D6 — Verification (probes) & diagnostics
 
 **Decision**:
-- **Setup probe** (and doctor re-check): generate a min-policy request; run (positive) `echo`/file-write-inside-scope; then (negative) attempt a write outside `allowWrite`, a read of a deny-listed path, and a direct connect to a non-allowlisted host. All negatives must fail; any pass = environment unsuitable → refuse + report (per spec R2.4, R6).
+- **Setup probe** (and doctor re-check): generate a min-policy request; run (positive) `echo`/file-write-inside-scope; then (negative) attempt a write outside `allowWrite`, a read of a deny-listed path, and a direct connect to a non-allowlisted host; a contained workload that outlives its timeout must be terminated (no orphaned sandboxed process). All negatives must fail; any pass = environment unsuitable → refuse + report (per spec R2.4, R6).
 - **Diagnostics**: on containment failure/denial, Orbit captures the executor's diagnostic output (and, where accepted, its `--audit`-mode artifacts as an optional doctor triage command) and renders an owner-readable summary + support bundle path.
 
 **Rationale**: MXC's own platform-support guidance states discovery is not proof; only positive+negative workload tests prove enforcement. Orbit's existing "failIfUnavailable" philosophy maps directly.
@@ -110,3 +110,5 @@ Inventory from exploration (all addressed by R3 tasks):
 **Rationale**: This is Orbit's existing integration surface (the staff guard is a hook), sanctioned behavior, no intervention in how Claude handles its own flows — the boundary lands where Claude Code's own sandbox lands on macOS/Linux (shell commands only).
 
 **Alternatives considered**: whole-agent containment (rejected, owner decision 2026-11-04); static per-session container reuse (multi-command sessions would need lifecycle backends (`isolation_session`) and reintroduces agent-flow state, deferred; a per-command model is stateless and simpler).
+
+**Implementation-time verification required**: the tool names Claude Code exposes on Windows — whether shell calls surface as a `Bash` tool, a `PowerShell` tool, or another name — so the matcher matches the real surface; verified against the installed Claude Code before the hook-wiring task (T033) lands, mirroring D1's approach.

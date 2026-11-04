@@ -13,9 +13,8 @@ This feature makes Orbit a **first-class native Windows application**, using Mic
 
 WSL2 is demoted to an explicit **fallback mode**, used only when:
 
-1. The owner **bypasses MXC** (opts out of containment, per owner choice), or
-2. The owner **configures WSL2 mode** (chooses it over the default), or
-3. MXC is **not available or not supported** on the machine.
+1. The owner **explicitly opts out of MXC** — bypassing containment or configuring WSL2 mode (one explicit owner action; R4.2's single switch), or
+2. MXC is **not available or not supported** on the machine.
 
 **Target user**: a non-technical owner on Windows 11 who should not need to know what WSL, bubblewrap, or PowerShell are. Everything that today must happen "inside WSL" (install, service, sandbox, browser, notifications, speech) must work natively.
 
@@ -135,7 +134,7 @@ On native Windows, with WSL2 absent, all of the following work natively and with
 ## Success Criteria
 
 - **SC1 — Setup parity**: On a clean Windows 11 machine with WSL2 not installed, a non-technical owner completes `setup` including the first hire and the service running at login, in under 30 minutes, with no Linux shell and no manual command beyond Orbit's own prompts.
-- **SC2 — Containment enforcement**: 100% of the negative probe tests (secret read, out-of-scope write, non-allowlisted network destination, denied command family) fail closed on native Windows MXC mode, matching the same tests on macOS/Linux/WSL2.
+- **SC2 — Containment enforcement**: 100% of the negative probe tests (secret read, out-of-scope write, non-allowlisted network destination) fail closed on native Windows MXC mode, matching the same tests on macOS/Linux/WSL2, and a command that outlives its timeout is terminated (no orphaned sandboxed workload). Denied command families are enforced by the permission/mode layer — unchanged on every platform — and are not sandbox probes.
 - **SC3 — No silent mode changes**: Fallback to WSL2 occurs only through the two documented triggers (owner configuration or MXC unavailability); a test battery demonstrates no other path changes the mode (no accidental per-run switching).
 - **SC4 — Zero regression**: Existing macOS, Linux, and WSL2 behaviors are unchanged — all existing tests pass unmodified.
 - **SC5 — Recognizable setup failures**: Every must-fix doctor condition names its cause and its fix command; testing across at least: no CLAUDE tooling, unsupported Windows build, missing MXC prerequisites, no network connectivity, missing speech tools.

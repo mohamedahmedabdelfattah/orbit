@@ -25,3 +25,4 @@
 1. The hook never runs executor `--audit` mode or telemetry-affecting flags on real commands.
 2. Reason strings are single-line, sanitized (no secrets, no control characters) per the run-log diagnostics convention.
 3. Latency: the hook adds minimal overhead — policy context is cached per run; request generation targets well under a second (SC6).
+4. The tool names the matcher targets (`Bash|PowerShell`) are an implementation-time verification against the installed Claude Code's Windows tool surface (see research D9); the wiring task (T033) re-checks them when it lands.

@@ -42,8 +42,8 @@ Outcome of the setup/doctor containment check.
 | --- | --- |
 | mode attempted | `mxc` / `wsl2` |
 | positive tests (workload) | pass/fail each |
-| negative tests (write, read, network) | pass/fail each (pass = correctly denied) |
-| capability notes | e.g., network-host filtering unavailable on this build |
+| negative tests (write, read, network, timeout) | pass/fail each (pass = correctly denied; timeout = workload terminated, no orphaned sandboxed process) |
+| capability notes | e.g., network-host filtering unavailable on this build; per-command startup milliseconds (SC6) |
 | verdict | usable / unusable-with-reason |
 
 **State transitions**: `unknown → probing → usable` (setup proceeds); `unknown → probing → unusable` (native Windows: refuse unsandboxed; offer WSL2 recommendation — the one auto path, recorded in PlatformMode.decided_by = `unavailable`).
@@ -57,7 +57,7 @@ Outcome of the setup/doctor containment check.
 | Entity | Native-Windows value |
 | --- | --- |
 | `SECRET_PATHS` | `%USERPROFILE%\.ssh`, `%USERPROFILE%\.aws`, `%APPDATA%\gnupg`, `%APPDATA%\rclone`, `~/.netrc`, Chrome (`%APPDATA%\Google\Chrome`), Edge (`%LOCALAPPDATA%\Microsoft\Edge`), browser caches (`%LOCALAPPDATA%\Microsoft\Windows\INetCookies`), Desktop/Documents/Downloads, Orbit secrets folder |
-| denied command families | keep `powershell`, `cmd`, `wsl`, `schtasks` families on native Windows (they are local tools there) |
+| denied command families | denial set unchanged on native Windows — `powershell`, `cmd`, `wsl`, `schtasks` stay denied at the permission/mode layer exactly as today (local availability does not lift their denial; MXC contains only permitted shell work) |
 | team data root | `%USERPROFILE%\Staff` (or `STAFFROOM_HOME`) |
 | service identity | Scheduled Task `Orbit` (logon trigger) + `staffd_alive` stamp |
 | hook registration | a `PreToolUse` hook (matcher `Bash\|PowerShell`) in the employee-facing settings Orbit generates per run, invoking Orbit's containment helper |

@@ -8,7 +8,7 @@
 
 ## Phase 1 — Setup
 
-- [ ] T001 Create the new core module skeleton `core/mxc.py` with the module doc describing its one job (translate Orbit policy to an MXC stable-schema request; launch and probe employee runs; refuse instead of unsandbox), the pinned request schema major version constant, and executor invocation constants — matching the doc style of `core/osinfo.py`
+- [ ] T001 Create the new core module skeleton `core/mxc.py` with the module doc describing its one job (translate Orbit policy to a per-contained-command MXC stable-schema request; issue contained commands through the hook helper and probe the sandbox; refuse instead of unsandbox), the pinned request schema major version constant, and executor invocation constants — matching the doc style of `core/osinfo.py`
 - [ ] T002 [P] Add the fake-executor seam inside `core/mxc.py`: a single overridable `_spawn_executor(args, env, ...)` plus `set_executor_stub()`/stub helpers so unit tests can intercept launches (pattern: `ORBIT_OS` fakes in `core/osinfo.py`)
 - [ ] T003 [P] Extend `tests/test_platforms.py` with an `ORBIT_OS="windows"` fixture harness (imports modules under `ORBIT_OS`, asserts `osinfo.KIND == "windows"` once Phase 2 exists) — mirror the existing `ORBIT_OS="wsl"` harness at line 83
 
@@ -30,15 +30,15 @@
 - [ ] T022 [US1] Service: extend `orbit::start_other()`/`stop()` with a native-Windows branch — create/delete the Scheduled Task per `contracts/service-task.md` (name `Orbit`, logon trigger, `pythonw.exe … orbit service-run`, `STAFFROOM_HOME` env, hidden); liveness via the existing `staffd_alive` stamp; failure messaging must not mention WSL
 - [ ] T023 [US1] Doctor: extend `orbit::platform_checks()` with a native-Windows branch (Python found on PATH, MXC runtime present + schema version match, Python deps, ffmpeg/tesseract, speech model, service running); must-fix/optional flags per spec R3.3; every fix message names a native command
 - [ ] T024 [P] [US1] Unit tests (ORBIT_OS=windows): scheduled-task creation command construction (fake `_ps`-equivalent / subprocess capture), start/stop idempotence, doctor check output golden strings in `tests/test_platforms.py`
-- [ ] T025 [US1] Docs: README.md + SETUP.md — native Windows as the primary Windows path (one PowerShell command, then `orbit setup`), WSL2 presented as the fallback with its existing section preserved; update CLAUDE.md/PRODUCT.md platform lines
+- [ ] T025 [US1] Docs: README.md + SETUP.md — native Windows as the primary Windows path (one PowerShell command, then `orbit setup`), WSL2 presented as the fallback with its existing section preserved; update CLAUDE.md/PRODUCT.md platform lines, plus the one-line MXC-telemetry note in the privacy docs (spec Assumption 5)
 
 ## Phase 4 — US3: sandboxed employee runs, native (MXC)
 
 **Goal**: each shell/PowerShell command runs contained under MXC via the PreToolUse hook, with full policy parity and an unmodified agent process (spec R2.1–R2.4, SC2). **Independent test**: translation invariants + hook-decision matrix + negative-probe parity in unit tests; quickstart Scenario B manually.
 
 - [ ] T030 [US3] Policy translation in `core/mxc.py::build_request(emp, command, cwd)`: map `engine`'s existing policy sources → `contracts/mxc-request.md` (deny_read incl. Windows secret paths, allow_write truncated to workspace+team+temp, network egress deny-default + allowlist incl. `BASE_DOMAINS` + registry domains + gateway hosts, timeout) — deterministic, cached per run (data-model §2)
-- [ ] T031 [US3] Request invariants tests (T030): fail-closed defaults, deny∩allow disjointness, no silent loosening — per the contract's invariants 1–5, in `tests/test_mxc.py`
-- [ ] T032 [US3] Hook implementation `core/mxc.py::handle_pre_tool_use()`: read the hook JSON (stdin), decide per `contracts/cc-hook.md` — excluded → no decision; contained → `allow` + `updatedInput` with the contained command; impossible → `deny` + plain-language reason (R2.4); emit diagnostics entries for the run log
+- [ ] T031 [US3] Request invariants tests (T030): determinism (two builds byte-equal modulo temp/time, R2.5), fail-closed defaults, deny∩allow disjointness, no silent loosening — per the contract's invariants 1–5, in `tests/test_mxc.py`
+- [ ] T032 [US3] Hook implementation `core/mxc.py::handle_pre_tool_use()`: read the hook JSON (stdin), decide per `contracts/cc-hook.md` — excluded → no decision; contained → `allow` + `updatedInput` with the contained command; impossible → `deny` + plain-language reason (R2.4); emit diagnostics entries for the run log, including a hash of the generated request per contained command for audit/support (R2.5)
 - [ ] T033 [US3] Hook registration wiring in `core/engine.py::settings_json()`: on native Windows, add the `PreToolUse` hook (matcher `Bash|PowerShell`, Orbit helper in exec form) to the settings blob, and omit the built-in sandbox's `failIfUnavailable` key (agent must start normally); verify hooks are honored via `--settings`, else write to the workspace `.claude/settings.json` (contract note); mac/Linux/WSL2 settings output byte-identical to today
 - [ ] T034 [P] [US3] Hook decision-matrix + executor-flow unit tests via the fake seam (excluded pass-through, allow+rewrite auto-approve pairing, deny-on-failure, no widening) in `tests/test_mxc.py`; ORBIT_OS=wsl regression untouched
 - [ ] T035 [P] [US3] Denial/sandbox-validation surfacing: parse executor failure/diagnostic output into owner-readable summaries + support-bundle path in `core/mxc.py` (feeds R6.3)
@@ -47,7 +47,7 @@
 
 **Goal**: setup/doctor prove both directions before any crew run (spec R6.1–R6.3). **Independent test**: probe verdict states exercised via fake executor; quickstart Scenarios A/C.
 
-- [ ] T040 [US6] Implement `core/mxc.py::probe()` — min-policy request set per plan D6: positive (allowed write succeeds), negatives (write outside scope, deny_read access, non-allowlisted connect) with a probe-result structure per data-model §3 (`usable`/`unusable-with-reason`, capability notes)
+- [ ] T040 [US6] Implement `core/mxc.py::probe()` — min-policy request set per plan D6: positive (allowed write succeeds), negatives (write outside scope, deny_read access, non-allowlisted connect, contained workload terminated at its `timeout_ms` — no orphaned sandboxed process) with a probe-result structure per data-model §3 (`usable`/`unusable-with-reason`, capability notes incl. per-command startup milliseconds for SC6)
 - [ ] T041 [US6] Wire the probe into `orbit setup` (before service start / first hire) and `orbit doctor` (a must-fix check) per spec R6.1; unusable on native Windows ⇒ refuse unsandboxed and print the two prerequisites (mxc fix or wsl2 fallback) — R4.4
 - [ ] T042 [P] [US6] Triage command: `orbit doctor --audit` runs the executor's audit mode on a tiny workload and renders the owner-readable report from T035 — explicitly never used on real runs (contract note)
 - [ ] T043 [US6] Unit tests: probe matrix (all pass ⇒ usable; each negative passing ⇒ unusable with matching reason) in `tests/test_mxc.py`
