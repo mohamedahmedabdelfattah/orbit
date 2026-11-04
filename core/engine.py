@@ -52,6 +52,16 @@ SECRET_PATHS = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gh", "~/.config/rclon
                 "~/.mozilla", "~/.config/google-chrome", "~/.config/chromium", SECRETS]
 if osinfo.KIND == "wsl":
     SECRET_PATHS.append("/mnt")                        # the Windows drives: their files stay out of reach
+elif osinfo.KIND == "windows":                         # the same set in its Windows-native locations
+    _P = os.path.expanduser("~")
+    _AD, _LAD = os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", "")
+    SECRET_PATHS = [os.path.join(_P, ".ssh"), os.path.join(_P, ".aws"), os.path.join(_AD, "gnupg"),
+                    os.path.join(_AD, "rclone"), os.path.join(_P, ".netrc"),
+                    os.path.join(_P, ".claude", ".credentials.json"), os.path.join(_P, ".claude", "channels"),
+                    os.path.join(_AD, "Google", "Chrome"), os.path.join(_LAD, "Microsoft", "Edge"),
+                    os.path.join(_LAD, "Microsoft", "Windows", "INetCookies"),
+                    os.path.join(_P, "Desktop"), os.path.join(_P, "Documents"), os.path.join(_P, "Downloads"),
+                    SECRETS]
 BASE_ALLOWED = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "TodoWrite", "Skill"]
 BASE_DENIED = ["Bash(git push *)", "Bash(git push)", "Bash(git remote *)", "Bash(sudo *)",
                "Bash(ssh *)", "Bash(scp *)", "Bash(security *)", "Bash(osascript *)",
@@ -197,7 +207,7 @@ def clean_env(emp: dict) -> dict:
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDE_AGENT_SDK")) and k != "CLAUDECODE"}
     env["HOME"] = H
-    env["PATH"] = ":".join([BIN, os.path.dirname(resolve_claude())] + osinfo.path_dirs())
+    env["PATH"] = os.pathsep.join([BIN, os.path.dirname(resolve_claude())] + osinfo.path_dirs())
     env["CLAUDE_CODE_FORK_SUBAGENT"] = "0"              # no hidden conversation-copying subagents
     env["STAFF_EMPLOYEE"] = emp["id"]
     env["STAFF_WORKSPACE"] = emp["workspace"]
@@ -219,22 +229,35 @@ def autonomous(emp: dict) -> bool:
     return "full_autonomy" in abilities.effective(emp["id"])
 
 
-def settings_json(emp: dict, unsandboxed: list) -> str:
-    """The run's sandbox: its folder, no secrets, no colleagues. Network: the approved sites only, or (Full
-    autonomy) any site, with the filesystem limits unchanged."""
+def sandbox_blob(emp: dict, unsandboxed: list) -> dict:
+    """The run's sandbox as a settings blob: its folder, no secrets, no colleagues. Network: the
+    approved sites only, or (Full autonomy) any site, with the filesystem limits unchanged.
+    On native Windows the built-in sandbox doesn't exist, so the failIfUnavailable requirement is
+    omitted (the agent starts normally) and containment arrives instead through the PreToolUse
+    hook, which makes MXC the per-command boundary (research D9, contracts/cc-hook.md)."""
     others = [p for p in glob.glob(os.path.join(HOME, "employees", "*"))
               if os.path.realpath(p) != os.path.realpath(emp["workspace"])]
     domains = BASE_DOMAINS + registry().get("network_domains", []) + emp.get("network_domains", [])
-    return json.dumps({
-        "enabledPlugins": {},
-        "sandbox": {
-            "enabled": True, "allowUnsandboxedCommands": False, "failIfUnavailable": True,
-            "network": {"allowedDomains": sorted(set(domains)), "strictAllowlist": not autonomous(emp)},
-            "filesystem": {"denyRead": SECRET_PATHS + others,
-                           "allowWrite": [os.path.join(HOME, "team")]},   # the team bus
-            "excludedCommands": ["%s *" % c for c in unsandboxed],
-        },
-    })
+    sandbox = {
+        "enabled": True, "allowUnsandboxedCommands": False,
+        "network": {"allowedDomains": sorted(set(domains)), "strictAllowlist": not autonomous(emp)},
+        "filesystem": {"denyRead": SECRET_PATHS + others,
+                       "allowWrite": [os.path.join(HOME, "team")]},   # the team bus
+        "excludedCommands": ["%s *" % c for c in unsandboxed],
+    }
+    blob = {"enabledPlugins": {}}
+    if osinfo.KIND == "windows":
+        import mxc
+        blob["hooks"] = mxc.hook_settings()
+    else:
+        sandbox["failIfUnavailable"] = True
+    blob["sandbox"] = sandbox
+    return blob
+
+
+def settings_json(emp: dict, unsandboxed: list) -> str:
+    """The run's settings blob (see sandbox_blob)."""
+    return json.dumps(sandbox_blob(emp, unsandboxed))
 
 
 def skills_plugin(emp: dict, wanted: list) -> str:
@@ -516,7 +539,8 @@ def claude_session(emp_id: str) -> dict:
     emp = employee(emp_id)
     ws = emp["workspace"]
     allow, block = abilities.tools(emp["id"])
-    sandbox = json.loads(settings_json(emp, abilities.commands(emp["id"])))["sandbox"]
+    blob = json.loads(settings_json(emp, abilities.commands(emp["id"])))
+    sandbox, hooks = blob["sandbox"], blob.get("hooks")
     env = clean_env(emp)
     deny = []
     for rule in BASE_DENIED + block + emp.get("extra_denied", []):
@@ -549,6 +573,8 @@ def claude_session(emp_id: str) -> dict:
         "env": {k: env[k] for k in ("STAFF_EMPLOYEE", "STAFF_WORKSPACE", "STAFFROOM_HOME", "STAFFROOM_KIT",
                                      "STAFF_ABILITIES", "STAFF_BROWSER_SITES", "PATH")},
     })
+    if hooks:                                           # native Windows: the PreToolUse containment hook
+        local["hooks"] = hooks
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(local, fh, indent=2)

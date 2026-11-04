@@ -20,20 +20,31 @@ import sys
 def _kind() -> str:
     if sys.platform == "darwin":
         return "mac"
+    wsl_env = bool(os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"))
     try:
         with open("/proc/version", encoding="utf-8", errors="replace") as fh:
             if "microsoft" in fh.read().lower():
                 return "wsl"
     except OSError:
         pass
+    if sys.platform == "win32" and not wsl_env:
+        return "windows"
     return "linux" if sys.platform.startswith("linux") else sys.platform
 
 
 KIND = os.environ.get("ORBIT_OS") or _kind()          # ORBIT_OS: tests pretend to be another computer
-DEVICE = {"mac": "Mac", "wsl": "PC"}.get(KIND, "computer")
-SUPPORTED = KIND in ("mac", "wsl", "linux")
-NAME = {"mac": "macOS", "wsl": "Windows (WSL)", "linux": "Linux"}.get(KIND, KIND)
-BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"), "/usr/bin", "/bin"]
+if KIND == "windows":
+    import glob as _glob
+    DEVICE, SUPPORTED, NAME = "PC", True, "Windows"
+    _WINDIRS = [os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links"),
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")]
+    _WINDIRS += _glob.glob(os.path.join(os.environ.get("APPDATA", ""), "Python", "*", "Scripts"))
+    BIN_DIRS = [d for d in _WINDIRS if d and os.path.isdir(d)]
+else:
+    DEVICE = {"mac": "Mac", "wsl": "PC"}.get(KIND, "computer")
+    SUPPORTED = KIND in ("mac", "wsl", "linux")
+    NAME = {"mac": "macOS", "wsl": "Windows (WSL)", "linux": "Linux", "windows": "Windows"}.get(KIND, KIND)
+    BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"), "/usr/bin", "/bin"]
 
 _MAC = re.compile(r"\b(this|your|the|a) Mac\b")
 
@@ -42,7 +53,7 @@ def local(text: str) -> str:
     """'this Mac' / 'your Mac' / 'the Mac' in the kit's own words, said for this computer. Identity on a Mac."""
     if KIND == "mac" or not text:
         return text
-    dev = {"wsl": "PC"}.get(KIND, "computer")
+    dev = {"wsl": "PC", "windows": "PC"}.get(KIND, "computer")
     return _MAC.sub(lambda m: "%s %s" % (m.group(1), dev), text)
 
 
@@ -53,6 +64,10 @@ def which(name: str):
 
 def path_dirs() -> list:
     """Folders a service or an employee's shell looks in for programs, in order."""
+    if KIND == "windows":
+        w = os.environ.get("WINDIR", r"C:\Windows")
+        return BIN_DIRS + [os.path.join(w, "System32"), w,
+                           os.path.join(w, "System32", "WindowsPowerShell", "v1.0")]
     return [d for d in BIN_DIRS if d not in ("/usr/bin", "/bin")] + ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
 
@@ -62,6 +77,13 @@ def open_url(url: str) -> bool:
         cmds = [["open", url]]
     elif KIND == "wsl":                                   # the Windows browser, not one inside Linux
         cmds = [["wslview", url], ["explorer.exe", url], ["cmd.exe", "/c", "start", "", url.replace("&", "^&")]]
+    elif KIND == "windows":
+        import webbrowser
+        try:
+            webbrowser.open(url)
+            return True
+        except OSError:
+            return False
     else:
         cmds = [["xdg-open", url]]
     for c in cmds:
@@ -106,6 +128,14 @@ def notify(title: str, text: str) -> bool:
         if KIND == "linux" and which("notify-send"):
             subprocess.run([which("notify-send"), title, text], capture_output=True, timeout=10)
             return True
+        if KIND == "windows":                             # a tray balloon: the toast PowerShell gets for free
+            q = lambda s: "'" + s.replace("'", "''") + "'"
+            ps = ("Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; "
+                  "$n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; "
+                  "$n.ShowBalloonTip(5000, %s, %s, 2); Start-Sleep -Seconds 6; $n.Dispose()" % (q(title), q(text)))
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           capture_output=True, timeout=12)
+            return True
     except (OSError, subprocess.TimeoutExpired):
         pass
     return False
@@ -117,7 +147,10 @@ def distro() -> str:
 
 
 def win_path(p: str) -> str:
-    """A Linux path as Windows programs see it (\\\\wsl.localhost\\Ubuntu\\home\\…)."""
+    """A Linux path as Windows programs see it (\\\\wsl.localhost\\Ubuntu\\home\\…). WSL only: a native
+    Windows path already is one."""
+    if KIND == "windows":
+        return p
     r = subprocess.run(["wslpath", "-w", p], capture_output=True, text=True, timeout=10)
     if r.returncode != 0 or not r.stdout.strip():
         raise OSError("wslpath couldn't convert %s" % p)
@@ -125,7 +158,9 @@ def win_path(p: str) -> str:
 
 
 def win_env(name: str) -> str:
-    """A Windows environment variable (APPDATA, USERPROFILE…), read through cmd.exe."""
+    """A Windows environment variable (APPDATA, USERPROFILE…). Native: it's right here. WSL: cmd.exe reads it."""
+    if KIND == "windows":
+        return os.environ.get(name, "")
     exe = which("cmd.exe") or "/mnt/c/Windows/System32/cmd.exe"
     try:
         r = subprocess.run([exe, "/c", "echo %" + name + "%"], capture_output=True, text=True, timeout=15,
@@ -142,7 +177,10 @@ def lin_path(winp: str) -> str:
 
 
 def win_python():
-    """Python for Windows (for live calls: Linux inside WSL can't hear Windows apps). → command list or None."""
+    """Python for Windows (for live calls: Linux inside WSL can't hear Windows apps). → command list or None.
+    Native Windows: this Python, of course."""
+    if KIND == "windows":
+        return [sys.executable] if sys.executable else None
     for c in (["py.exe", "-3"], ["python.exe"], ["python3.exe"]):
         exe = which(c[0])
         if not exe:
