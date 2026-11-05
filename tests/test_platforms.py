@@ -68,6 +68,14 @@ def wait_for(cond, secs=10):
     return False
 
 
+def win_py(code, os_kind="windows"):
+    """This Python pretending to be another computer (ORBIT_OS=windows): engine and osinfo are imported
+    fresh in a subprocess, so kind-dependent module state is really that kind's."""
+    return subprocess.run([sys.executable, "-c", code],
+                          env=dict(os.environ, ORBIT_OS=os_kind, PYTHONPATH=os.path.join(KIT, "core")),
+                          capture_output=True, text=True)
+
+
 class Words(unittest.TestCase):
     def test_mac_words_stay_on_a_mac(self):
         old = osinfo.KIND
@@ -379,7 +387,11 @@ class ClaudeSession(unittest.TestCase):
         with open(os.path.join(ws, ".claude", "settings.local.json")) as fh:
             d = json.load(fh)
         self.assertTrue(d["sandbox"]["enabled"])
-        self.assertTrue(d["sandbox"]["failIfUnavailable"])
+        if osinfo.KIND == "windows":                     # native Windows: MXC holds the line via the hook
+            self.assertNotIn("failIfUnavailable", d["sandbox"])   # the agent must start normally (T033)
+            self.assertIn("PreToolUse", d.get("hooks", {}))
+        else:
+            self.assertTrue(d["sandbox"]["failIfUnavailable"])    # mandatorily sandboxed builds fail closed
         self.assertIn("Bash(git push *)", d["permissions"]["deny"])
         self.assertFalse(any(r.startswith("Write(") for r in d["permissions"]["deny"]))
         self.assertEqual(d["env"]["STAFF_EMPLOYEE"], eid)
@@ -1393,3 +1405,136 @@ class ExtraComputing(unittest.TestCase):
         self.assertNotIn("secrets.", self.c.WORKFLOW_YML)
         self.assertIn("COMMAND: ${{ inputs.command }}", self.c.WORKFLOW_YML)   # passed by env, never pasted into the script
 
+=======
+class NativeWindows(unittest.TestCase):
+    """Native Windows, no WSL underneath (T003/T015): its kind, its paths, its secrets, and the
+    sandbox shape its runs carry. Module-state assertions run in a subprocess with ORBIT_OS=windows
+    (engine is imported once per process, so in-process fakes can't influence the module state) —
+    the same trick the existing ORBIT_OS=wsl harness uses."""
+
+    def win_py(self, code, kind="windows"):
+        r = win_py(code, kind)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    # --- the kind and its identity (T010/T011)
+    def test_windows_without_wsl_is_its_own_kind(self):
+        self.assertEqual(self.win_py("import osinfo; print(osinfo.KIND)").strip(), "windows")
+
+    def test_a_windows_pc_is_supported_and_titled(self):
+        out = self.win_py("import osinfo; print(osinfo.DEVICE, osinfo.SUPPORTED, osinfo.NAME)").strip()
+        self.assertEqual(out, "PC True Windows")            # the panel/build can say "on this PC"
+
+    def test_windows_says_pc(self):
+        self.assertEqual(self.win_py("import osinfo; print(osinfo.local('on this Mac'))").strip(),
+                         "on this PC")
+
+    # --- programs and paths (T011)
+    def test_windows_programs_are_found_in_windows_places(self):
+        dirs = json.loads(self.win_py("import osinfo, json; print(json.dumps(osinfo.path_dirs()))"))
+        norm = [os.path.normcase(d) for d in dirs]
+        self.assertTrue(any("winget\\links" in d for d in norm), norm[:2])   # winget-installed CLIs
+        self.assertTrue(any(d.endswith("system32") for d in norm))          # where wxc-exec lands too
+        self.assertTrue(any("powershell" in d for d in norm))               # PowerShell.exe resolves
+
+    def test_native_paths_read_directly_wsl_hops_survive(self):
+        win = json.loads(self.win_py("import osinfo, json, sys; print(json.dumps("
+                                     "[osinfo.win_path(r'C:\\x'), osinfo.win_env('APPDATA') != '', "
+                                     "osinfo.win_python() == [sys.executable]]))"))
+        self.assertEqual(win, [r"C:\x", True, True])        # native Windows: no wslpath/cmd.exe/py.exe hops
+
+    # --- secrets (T013)
+    def test_windows_secrets_are_the_windows_stores(self):
+        paths = json.loads(self.win_py("import engine, json; print(json.dumps(engine.SECRET_PATHS))"))
+        joined = " ".join(os.path.normcase(p).replace("\\", "/") for p in paths)
+        for bit in (".ssh", ".aws", "gnupg", "rclone", ".netrc", "credentials.json", "channels",
+                    "google/chrome", "microsoft/edge", "inetcookies",
+                    "desktop", "documents", "downloads"):
+            self.assertIn(bit, joined, bit)                 # every column in data-model "Windows-native value"
+        self.assertFalse(any(p.startswith("/mnt") for p in paths))          # no /mnt bridge on native Windows
+
+    def test_wsl_runs_still_wall_off_the_windows_drives(self):
+        out = self.win_py("import engine; print(any(p == '/mnt' for p in engine.SECRET_PATHS))", "wsl")
+        self.assertEqual(out.strip(), "True")
+
+    # --- the sandbox shape of a native run (T033)
+    def test_windows_runs_carry_the_containment_hook_not_fail_unavailable(self):
+        r = json.loads(self.win_py(
+            "import engine, json; b = engine.sandbox_blob({'id': 't', 'workspace': '.', 'name': 't'}, []); "
+            "h = (b.get('hooks') or {}).get('PreToolUse', [{}])[0]; "
+            "print(json.dumps({'fail': b['sandbox'].get('failIfUnavailable'), "
+            "'matcher': h.get('matcher'), 'hook_cmd': h.get('hooks', [{}])[0].get('command', '')}))"))
+        self.assertEqual(r["fail"], None)                   # the agent starts normally; MXC holds the line
+        self.assertEqual(r["matcher"], "Bash|PowerShell")
+        self.assertIn("mxc.py", r["hook_cmd"])              # Orbit's helper, not an inline blob
+        self.assertIn("--hook", r["hook_cmd"])
+
+    def test_wsl_runs_keep_the_fail_unavailable_sandbox(self):   # T034 regression parity
+        for kind in ("wsl", "mac", "linux"):
+            r = json.loads(self.win_py(
+                "import engine, json; b = engine.sandbox_blob({'id': 't', 'workspace': '.', 'name': 't'}, []); "
+                "print(json.dumps([b['sandbox'].get('failIfUnavailable'), 'hooks' in b]))", kind))
+            self.assertEqual(r, [True, False], kind)
+
+
+class Mode(unittest.TestCase):
+    """The containment path on Windows: MXC by default, WSL2 only by owner choice or a recorded
+    unavailability — nothing else may decide it (R4.1, SC3). In-process against the registry."""
+
+    def setUp(self):
+        self.kind = osinfo.KIND
+        reg = engine.registry()
+        reg.pop("platform", None)
+        engine.save_registry(reg)
+
+    def tearDown(self):
+        osinfo.KIND = self.kind
+        reg = engine.registry()
+        reg.pop("platform", None)
+        engine.save_registry(reg)
+
+    def test_windows_defaults_to_mxc_and_elsewhere_to_wsl2(self):
+        import mxc
+        try:
+            osinfo.KIND = "windows"
+            self.assertEqual(mxc.mode(), "mxc")             # the mode isn't stored here: it's the default
+            info = mxc.mode_info()
+            self.assertEqual(info, {"sandbox_mode": "mxc", "decided_by": "", "decided_at": "",
+                                    "mxc_unavailable_reason": None})
+            osinfo.KIND = "wsl"
+            self.assertEqual(mxc.mode(), "wsl2")            # a Mac/WSL/Linux box: the old way, always
+        finally:
+            osinfo.KIND = self.kind
+
+    def test_only_an_owner_or_recorded_unavailability_moves_the_mode(self):
+        import mxc
+        osinfo.KIND = "windows"
+        with self.assertRaises(ValueError):
+            mxc.set_mode("banana")                          # not a mode
+        with self.assertRaises(ValueError):
+            mxc.set_mode("wsl2", "anyone")                  # decided_by must be owner or unavailable
+        mxc.set_mode("wsl2")                                # an owner choice needs no reason
+        info = mxc.mode_info()
+        self.assertEqual((info["sandbox_mode"], info["decided_by"]), ("wsl2", "owner"))
+        self.assertTrue(info["decided_at"])
+        self.assertIsNone(info["mxc_unavailable_reason"])
+
+    def test_unavailability_falls_back_to_wsl2_with_its_reason_recorded(self):
+        import mxc
+        osinfo.KIND = "windows"
+        with self.assertRaises(ValueError):
+            mxc.record_unavailable("")                      # a silent fallback is forbidden (R4.1)
+        mxc.record_unavailable("the MXC runtime is missing")
+        self.assertEqual(mxc.mode_info()["sandbox_mode"], "wsl2")
+        self.assertEqual(mxc.mode_info()["decided_by"], "unavailable")
+        self.assertEqual(mxc.unavailable_reason(), "the MXC runtime is missing")
+
+    def test_a_stored_mode_beats_the_default(self):
+        import mxc
+        reg = engine.registry()
+        reg["platform"] = {"sandbox_mode": "wsl2", "decided_by": "owner", "decided_at": "2026-11-04",
+                           "mxc_unavailable_reason": None}
+        self.assertEqual(mxc.mode_info(reg)["sandbox_mode"], "wsl2")
+        osinfo.KIND = "wsl"
+        reg["platform"]["sandbox_mode"] = "mxc"             # nonsense on non-Windows, but storage is neutral
+        self.assertEqual(mxc.mode_info(reg)["sandbox_mode"], "mxc")
