@@ -34,7 +34,8 @@ the work you give them are **missions**; **Launch** starts one.
 
 ## Get started
 
-**You need:** a Mac, a Windows PC (Windows 10 or 11) or a Linux PC, and a paid Claude plan (Pro or Max).
+**You need:** a Mac, a Windows PC (Windows 11 22H2 or newer; Windows 10 and even 11 without the
+sandbox follow the WSL fallback, below) or a Linux PC, and a paid Claude plan (Pro or Max).
 That's what your employees run on; nothing else is billed. Every feature works on all three; the few
 setup differences are below.
 
@@ -43,8 +44,8 @@ setup differences are below.
 > Set up Orbit for me: clone https://github.com/BasemTarekkamal/orbit into ~/orbit, then read ~/orbit/SETUP.md and follow it.
 
 Claude installs everything, says what each step does, and opens your control panel. On Windows it
-first asks you to turn on WSL (two clicks and a restart, below) and to type your password where one
-is needed. There you say who
+runs one PowerShell installer (`setup-windows.ps1`) — no Linux, no restarts (below); only on older
+Windows does it turn on WSL and type your password where one is needed. There you say who
 you are and what your business does, pick a job, and your own Claude interviews you about it: a few
 tap-to-answer questions written for that job (your channels, goals, tone, what they may do alone,
 what access you'd give). It turns your answers into the crew member's card: responsibilities, first
@@ -57,8 +58,22 @@ your new crew member, who introduces themselves and gets to work.
 git clone https://github.com/BasemTarekkamal/orbit ~/orbit && ~/orbit/install.sh
 ```
 
-**On Windows**, Orbit runs inside WSL, the Linux that comes with Windows. That's what keeps your crew
-in a sandbox there, the same one Claude Code uses on Linux.
+**On Windows** (Windows 11 22H2 or newer), in a PowerShell window:
+
+```powershell
+cd where\the\orbit\folder\is
+powershell -ExecutionPolicy Bypass -File setup-windows.ps1
+python .\orbit setup
+```
+
+One command installs Python and the tools, plus the **MXC sandbox** — each shell command your crew
+runs stays inside its own container: your home folder's private corners, your colleagues' work and
+every site you haven't approved stay out of reach. Mission Control opens in your browser, and the
+crew starts whenever you log in to Windows.
+
+**Fallback: Windows through WSL** (Windows 10, or a newer PC where the MXC runtime can't run).
+Orbit runs inside WSL, the Linux that comes with Windows — that keeps your crew in a sandbox there,
+the same one Claude Code uses on Linux.
 
 1. Turn WSL on, once: click Start, type **PowerShell**, right-click it, **Run as administrator**, and run
    `wsl --install`. Restart when it asks. An **Ubuntu** window opens: pick a username and password.
@@ -71,8 +86,10 @@ in a sandbox there, the same one Claude Code uses on Linux.
 
 **On Linux** (Ubuntu, Debian or Fedora): steps 2 to 4 in a terminal.
 
-Windows and Linux support is new (November 2026). It's tested automatically on Ubuntu and on WSL,
-but few people have used it yet, so please tell us what breaks.
+Windows and Linux support is new (November 2026). It's tested automatically on Ubuntu, on WSL and on
+Windows CI; the MXC sandbox itself (the per-command container on native Windows) is exercised on a real
+Windows 11 host following specs/001-windows-mxc-sandbox/quickstart.md, an on-demand guide — it isn't
+part of the automated test run. Please tell us what breaks.
 
 **Talking to your crew.** In Claude: every crew member has an **Open in Claude** button, a Claude
 session in their own folder with all of Claude's power and the same job, memory and safety locks. On
@@ -192,10 +209,11 @@ who don't live in Terminal: every setting is a button or a form.
 
 An autonomous agent that reads the open web needs locks, not promises. Every run gets:
 
-- **The sandbox** (macOS's own on a Mac; bubblewrap on Windows and Linux, the same one Claude Code
-  uses): shell commands reach only the sites you approve, and can't read your secrets, your Documents,
-  Desktop or Downloads, a colleague's folder, or (on Windows) your Windows drives. If the sandbox
-  can't start, the employee doesn't run.
+- **The sandbox** (macOS's own on a Mac; bubblewrap on Linux and in WSL, the same one Claude Code
+  uses; on a Windows PC, Microsoft Execution Containers — one container per shell command): shell
+  commands reach only the sites you approve, and can't read your secrets, your Documents,
+  Desktop or Downloads, or a colleague's folder. If the sandbox can't start, the command is denied,
+  never run unprotected.
 - **A guard** (a Claude Code hooks module, tested): no money movement, no banking, payment or
   crypto sites, no outside messages (no email, no posting, no raw chat APIs), no secrets, no editing
   the kit, its registry or the guard, no nested Claude runs. Card numbers and IBANs are masked before
@@ -263,8 +281,12 @@ orbit group <chat id> [--channel telegram|slack|discord]   the team chat
 
 - **Mac:** macOS, [Claude Code](https://claude.com/claude-code) signed in with your Claude account, and
   Python 3.9 or newer (the one macOS ships is fine). Optional: Homebrew for voice notes (`ffmpeg`, `whisper-cpp`).
-- **Windows:** Windows 10 (2004 or newer) or 11 with WSL 2 and Ubuntu (`wsl --install`), and inside it
-  Claude Code and `setup-linux.sh`. Optional: Python for Windows with `soundcard` for live calls.
+- **Windows (native, primary):** Windows 11 22H2 or newer, [Claude Code](https://claude.com/claude-code)
+  signed in with your Claude account, and Python 3 (`setup-windows.ps1` installs the MXC sandbox runtime,
+  the tools and the Python packages). Optional: `winget install Gyan.FFmpeg` and `orbit doctor --get-whisper`
+  for voice; Python's `soundcard` for live calls.
+- **Windows (fallback, through WSL):** Windows 10 (2004 or newer) or 11 with WSL 2 and Ubuntu
+  (`wsl --install`), and inside it Claude Code and `setup-linux.sh`.
 - **Linux:** Ubuntu 22.04+, Debian 12+ or Fedora, Claude Code, and `setup-linux.sh` (bubblewrap, socat,
   ffmpeg, tesseract, a compiler). Voice notes: `orbit doctor --get-whisper --get-voice-model`.
 - Everywhere, optional: a bot on Telegram, Slack or Discord ([docs/channels.md](docs/channels.md)), an Apify token.
@@ -297,8 +319,9 @@ More: [docs/toolbelt.md](docs/toolbelt.md) (every tool and skill), [docs/channel
 This kit runs Anthropic's unmodified Claude Code. Each user signs in with their own Claude account
 through Claude Code's own login; the kit never sees, stores or shares that login. If you choose
 API-key mode, your own key stays in `~/Staff/.secrets` on your computer. Usage is billed to you under your
-own agreement with Anthropic. It's an independent
-project, not made or endorsed by Anthropic. Respect the terms of the sites you research, and
+own agreement with Anthropic. Orbit's use of Microsoft Execution Containers on Windows doesn't turn on
+any Microsoft telemetry for you; whatever the runtime itself reports is Microsoft's own defaults. It's an independent
+project, not made or endorsed by Anthropic or Microsoft. Respect the terms of the sites you research, and
 people's privacy.
 
 ## License

@@ -15,8 +15,10 @@ API key), headless in the employee's folder, and gets whatever the employee's pr
   * abilities: tools, gateway commands and skills switched on or off per employee;
   * model routing: the employee's model, or the fallback when plan usage is high;
   * a cost/reliability log in <workspace>/state/runs.jsonl.
-Python 3.9 compatible (the Mac's system python). The same on Windows (inside WSL2) and Linux, where the
-sandbox is bubblewrap instead of macOS Seatbelt; osinfo.py holds the few differences.
+Python 3.9 compatible (the Mac's system python). The same on Linux and Windows-through-WSL2, where the
+sandbox is bubblewrap instead of macOS Seatbelt — and on a native Windows PC, where the sandbox is
+Microsoft Execution Containers, a container per shell command (core/mxc.py). osinfo.py holds the
+few differences.
 """
 from __future__ import annotations
 

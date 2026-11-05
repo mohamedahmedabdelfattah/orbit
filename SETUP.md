@@ -1,8 +1,8 @@
 # Setting up Orbit (instructions for Claude)
 
 Someone asked you to set up Orbit on their computer: a crew of AI employees that runs on this computer
-and on their own Claude plan. It works on a Mac, on Windows (inside WSL, the Linux that ships with
-Windows) and on Linux. They may not be technical. Do every step yourself. Before each step, say in one
+and on their own Claude plan. It works on a Mac, on Windows (natively, or through WSL2 as the fallback)
+and on Linux. They may not be technical. Do every step yourself. Before each step, say in one
 plain sentence what it does and why; after it, say what happened. Keep it calm and short.
 
 **Never ask for, read, copy or print a password, a token or a Claude login** in this chat. Bot tokens
@@ -14,7 +14,9 @@ If a step fails twice, stop and tell them plainly what failed and what you'd try
 ## 1. Which computer
 - `uname -s` says `Darwin`: a Mac. Follow **Mac** below.
 - `uname -s` says `Linux`: follow **Linux** below.
-- Otherwise (`MINGW…`/`MSYS…`, or PowerShell where `$env:OS` is `Windows_NT`): Windows. Follow **Windows**.
+- Otherwise (`MINGW…`/`MSYS…`, or PowerShell where `$env:OS` is `Windows_NT`): Windows. Follow **Windows**
+  below (native first; if the machine is Windows 10, or the doctor says the MXC runtime can't run here,
+  the same machine can run the crew through WSL — **Windows through WSL** further down).
 
 ## Mac
 1. `python3 --version` and `git --version`. If either is missing, macOS offers to install its developer
@@ -37,7 +39,26 @@ If a step fails twice, stop and tell them plainly what failed and what you'd try
 5. Hand over (below).
 
 ## Windows
-Orbit runs inside WSL 2 there: that is what lets it keep the crew in a sandbox. You run each Linux
+Native Windows is the primary Windows path: no WSL, no Linux shell, no restarts. You run commands from
+here (Claude, PowerShell or Terminal) as themselves.
+1. Get the kit. If the folder (say `C:\Users\them\orbit`) is already a checkout: `git -C <kit> pull --ff-only`.
+   Otherwise: `git clone https://github.com/BasemTarekkamal/orbit <kit>`.
+2. Claude Code for the employees, signed in with their own Claude account. `claude --version`, then
+   `claude auth status`. If it's missing or not signed in, have them install Claude Code for Windows
+   (https://claude.com/claude-code) and run `claude auth login` in their own window — a page opens in
+   their browser; nothing typed comes back to this chat.
+3. `powershell -ExecutionPolicy Bypass -File <kit>\setup-windows.ps1` (add `-Yes` to skip the optional
+   voice-notes prompts). It checks the Windows build, installs Python, git, ffmpeg and tesseract with
+   winget, installs the MXC sandbox runtime into the kit's `vendor\mxc` (checksum-verified), and the
+   Python packages, your user only. Two to five minutes. It's safe to run again.
+4. Starting the crew: `python <kit>\orbit setup` (it asks their business and bot token in the panel;
+   the checks gate it). If a check fails, `python <kit>\orbit doctor` and fix what it lists, one item
+   at a time — every fix names a Windows command.
+5. Hand over (below).
+
+## Windows through WSL (the fallback)
+For Windows 10, or Windows 11 machines where the doctor says the MXC runtime can't run. Orbit runs
+inside WSL 2 there: that is what lets it keep the crew in a sandbox. You run each Linux
 command from here with `wsl -d <distro> -- bash -lc "<command>"` (the distro name comes from step 1;
 usually `Ubuntu`). Quote the command so the Windows shell passes it through whole.
 1. `wsl -l -v`. If it lists no distro, or says WSL isn't installed, tell them: "Windows needs its Linux
@@ -79,7 +100,8 @@ Tell them, in your own words, short:
 - "Your control panel is open in your browser. It asks your name and what your business does, then you
   pick a job; your Claude asks a few questions about it and writes their card. When you launch them,
   Claude opens on them and they start right away with a real first task." If the page
-  didn't open: `~/orbit/orbit panel` (on Windows through `wsl -d <distro> -- bash -lc`).
+  didn't open: `~/orbit/orbit panel` (on Windows: `python <kit>\orbit panel`; through the WSL fallback,
+  `wsl -d <distro> -- bash -lc "~/orbit/orbit panel"`).
 - How they'll talk to their crew, all three ways, since they won't think to ask:
   1. **In the control panel:** open the crew member and type; the answer appears right under it.
   2. **On their phone** (recommended): Telegram, Slack or Discord, through a bot of their own. The panel's
@@ -100,11 +122,16 @@ Then offer to stay while they connect their phone. That's the whole setup.
   - Mac: needs Homebrew. If `brew --version` fails, explain that installing Homebrew asks for their Mac
     password, which they type themselves; with their yes, follow the command on https://brew.sh. Then
     `brew install ffmpeg whisper-cpp` and `~/orbit/orbit doctor --get-voice-model` (a 550 MB download).
-  - Windows and Linux: `~/orbit/orbit doctor --get-whisper --get-voice-model` (builds the speech engine,
-    a few minutes, and downloads the 550 MB model). For live calls on Windows, Python for Windows is
+  - Native Windows: `py` in PowerShell — `orbit doctor --get-whisper --get-voice-model` (builds the speech
+    engine or walks them through winget installs if that's needed, a few minutes, and downloads the
+    550 MB model). ffmpeg comes from `winget install Gyan.FFmpeg`; live calls need Python for Windows
+    (setup-windows.ps1 installs it).
+  - Windows through WSL and Linux: `~/orbit/orbit doctor --get-whisper --get-voice-model` (builds the
+    speech engine, a few minutes, and downloads the 550 MB model). For live calls, Python for Windows is
     needed too: ask them to run in PowerShell `winget install Python.Python.3.12`, then
     `py -m pip install soundcard numpy`.
-- **Sign Claude Code in again:** `claude auth login` (on Windows, in the Ubuntu window).
+- **Sign Claude Code in again:** `claude auth login` (in a Windows window, or in the Ubuntu window on
+  the WSL fallback).
 - **Update Orbit:** `git -C ~/orbit pull --ff-only && ~/orbit/orbit restart`.
 - **Something's wrong:** `~/orbit/orbit doctor`, then `~/orbit/orbit logs`.
 - **Stop it:** `~/orbit/orbit stop`. Their team's folder (`~/Staff`) stays unless they ask you to

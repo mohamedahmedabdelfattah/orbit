@@ -295,6 +295,40 @@ def _log_decision(ws: str, rec: dict) -> None:
         pass
 
 
+def denials(limit=10) -> list:
+    """Recent denials across the crew, in owner words (R6.3): who tried what, and why it was refused.
+    Commands run outside the container on purpose (the gateways) don't appear. Empty = nothing denied."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(engine.HOME, "employees", "*", "state", "mxc.jsonl"))):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("decision") == "deny":
+                out.append("/%s tried: %s — %s" % (rec.get("employee") or "?", rec.get("command", "?"),
+                                                   rec.get("reason") or "the sandbox couldn't start"))
+    return out[-limit:]
+
+
+def support_bundle_paths() -> list:
+    """The files support would ask for when something looks wrong (R6.3): the sandbox decision log, the
+    generated requests, and the run logs. Only these — never an employee's own work or memory."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(engine.HOME, "employees", "*", "state", "mxc.jsonl"))):
+        out.append(f)
+        req = os.path.join(os.path.dirname(f), "requests")
+        if os.path.isdir(req):
+            out.append(req)
+    out.extend(sorted(glob.glob(os.path.join(engine.HOME, "employees", "*", "state", "runs.jsonl"))))
+    return out
+
+
 def decision(payload: dict, cwd=None, now=None) -> dict:
     """One PreToolUse hook call → the hook's answer, per contracts/cc-hook.md.
     payload: {tool_name, tool_input:{command}} as Claude sends it."""
@@ -460,6 +494,15 @@ def probe_summary(res: dict) -> str:
             for k, ok in (res.get(grp) or {}).items() if ok is False]
     return "the sandbox couldn't be trusted yet%s. What failed: %s." % (
         (" (%s)" % notes) if notes else "", ", ".join(rows) or "unknown")
+
+
+def last_lines(path, limit=60) -> list:
+    """A log's last lines anywhere (Windows has no tail; this is the same read everywhere)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()[-limit:]
+    except OSError:
+        return []
 
 
 # ------------------------------------------------------------------ hook entry point

@@ -10,6 +10,16 @@ KIT=$(pwd -P)
 YES=""
 [ "$1" = "--yes" ] && YES=1
 
+# Native Windows (Git Bash, MinGW, MSYS): install from PowerShell instead — Orbit's Windows path is setup-windows.ps1
+case "$(uname -s)" in
+  *NT-*|MINGW*|MSYS*|CYGWIN*)
+    echo "You're on native Windows. In PowerShell run:"
+    echo
+    echo "  powershell -ExecutionPolicy Bypass -File \".\\setup-windows.ps1\""
+    echo
+    echo "then, still in PowerShell:  python .\\orbit setup"; exit 0 ;;
+esac
+
 MAC=""
 [ "$(uname)" = "Darwin" ] && MAC=1
 if [ -z "$MAC" ] && [ "$(uname)" != "Linux" ]; then

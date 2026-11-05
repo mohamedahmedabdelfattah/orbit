@@ -1,12 +1,13 @@
-"""Which computer Orbit runs on, and the few things that differ: a Mac, Windows (through WSL2, the Linux
-that ships with Windows), or a Linux PC. Everything else in the kit is the same code on all three.
+"""Which computer Orbit runs on, and the few things that differ: a Mac, a Windows PC (natively or
+through WSL2, the Linux that ships with Windows), or a Linux PC. Everything else in the kit is the
+same code on all of them.
 
     import osinfo
-    osinfo.KIND                 # "mac" | "wsl" | "linux"
+    osinfo.KIND                 # "mac" | "wsl" | "windows" | "linux"
     osinfo.DEVICE               # "Mac" | "PC" | "computer", for messages: "on this " + DEVICE
     osinfo.local(text)          # kit-written text with "this Mac" said the way this computer is called
     osinfo.open_url(url)        # opens a page in the owner's browser (on Windows: the Windows browser)
-    osinfo.which(name)          # a program, also in Homebrew's and the user's own bin folders
+    osinfo.which(name)          # a program, also in Homebrew's, winget's and the user's own folders
 """
 from __future__ import annotations
 

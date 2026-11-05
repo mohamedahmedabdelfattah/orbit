@@ -263,5 +263,36 @@ class Probe(unittest.TestCase):
         self.assertIn("proved both directions", mxc.probe_summary(r))
 
 
+class Support(unittest.TestCase):
+    """Denial surfacing for support (T035/R6.3): owner words in orbit logs; a bundle of evidence paths."""
+
+    def test_refusals_come_out_in_owner_words_without_pass_throughs(self):
+        eid = "sara"
+        ws = os.path.join(TMP, "employees", eid, "state")
+        os.makedirs(ws, exist_ok=True)
+        with open(os.path.join(ws, "mxc.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"decision": "pass-through", "employee": eid, "command": "staff-fetch x"}) + "\n")
+            fh.write(json.dumps({"decision": "allow", "employee": eid, "command": "echo hi",
+                                 "request_hash": "abc"}) + "\n")
+            fh.write(json.dumps({"decision": "deny", "employee": eid, "command": "cat .netrc",
+                                 "reason": "reading a denied path"}) + "\n")
+        rows = mxc.denials()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("sara", rows[0])
+        self.assertIn("cat .netrc", rows[0])
+        self.assertIn("reading a denied path", rows[0])
+
+    def test_the_bundle_is_evidence_files_not_private_work(self):
+        eid = "sara"
+        ws = os.path.join(TMP, "employees", eid, "state")
+        os.makedirs(os.path.join(ws, "requests"), exist_ok=True)
+        paths = mxc.support_bundle_paths()
+        text = " | ".join(paths)
+        self.assertIn("mxc.jsonl", text)
+        self.assertIn("requests", text)
+        self.assertFalse(any(p.endswith("CLAUDE.md") or "employees/sara/plan" in os.path.normcase(p)
+                             for p in paths))                     # never the work itself (R6.3)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""orbit: set up and run your crew of AI employees on this computer (a Mac, Windows through WSL, or Linux).
+"""orbit: set up and run your crew of AI employees on this computer (a Mac, a Windows PC, or Linux).
 
   orbit demo [--stop]              look around first: a pretend team in the control panel, nothing to set up
   orbit setup                      first run: checks, your business, your chat bot, your first hire
@@ -138,6 +138,9 @@ def checks():
         found = osinfo.which(b)
         if osinfo.KIND == "mac":
             fix = "brew install ffmpeg whisper-cpp"
+        elif osinfo.KIND == "windows":
+            fix = ("winget install Gyan.FFmpeg" if b == "ffmpeg"
+                   else "orbit doctor --get-whisper")
         else:
             fix = "sudo sh %s/setup-linux.sh" % KIT if b == "ffmpeg" else "orbit doctor --get-whisper"
         out.append((bool(found), "%s (%s)%s" % (b, why, "" if found else ": " + fix), False))
@@ -160,9 +163,12 @@ def checks():
 
 
 def platform_checks():
-    """The computer itself: macOS, or Windows/Linux with the sandbox's two helpers (bubblewrap, socat)."""
+    """The computer itself: macOS, native Windows (the MXC runtime), or Windows/Linux with the sandbox's
+    two helpers (bubblewrap, socat). Every must-fix names its fix (SC5); native fixes are native."""
     if osinfo.KIND == "mac":
         return [(True, "macOS (the sandbox and the service)", True)]
+    if osinfo.KIND == "windows":
+        return windows_checks()
     if not osinfo.SUPPORTED:
         return [(False, "%s isn't supported: Orbit runs on a Mac, on Windows (through WSL) or on Linux" % sys.platform, True)]
     out = []
@@ -185,6 +191,40 @@ def platform_checks():
         out.append((False, "the sandbox is blocked by AppArmor: " + setup, True))
     found = osinfo.which("tesseract")
     out.append((bool(found), "tesseract (reading scans and photos)%s" % ("" if found else ": " + setup), False))
+    return out
+
+
+def _win_build():
+    """This Windows' build line (10.0.26100 — the third number is the support matrix's row). A test that
+    isn't on Windows stands in with environment ORBIT_WIN_BUILD."""
+    if os.environ.get("ORBIT_WIN_BUILD"):
+        return os.environ["ORBIT_WIN_BUILD"]
+    try:
+        import platform
+        return ".".join(platform.version().split(".")[:3])
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def windows_checks():
+    """Native Windows (R3.3): the machine's MXC side, must-fix at setup; every fix is a native command."""
+    import mxc
+    out = []
+    build = _win_build()
+    parts = [p for p in (build.split(".") + ["0", "0"])[:3] if p.isdigit()]
+    ok = tuple(int(p) for p in parts) >= (10, 0, 22621)     # Windows 11 22H2: first build with containers
+    out.append((ok, "Windows 11 (22H2 or later)%s" % ("" if ok else
+                ": this is build %s, and Orbit's sandbox needs Windows 11 or newer. On this machine the crew "
+                "runs in WSL2 mode instead (see docs/SETUP.md, 'Windows through WSL')" % (build or "unknown")), True))
+    pyw = service_pythonw()
+    out.append((bool(pyw and os.path.exists(pyw)), "Python 3 (pythonw.exe runs the service)%s" % (
+        "" if pyw and os.path.exists(pyw) else ": reinstall Python, in Windows run  winget install Python.Python.3.12"), True))
+    d = mxc.discover()
+    out.append((d["ok"], "the MXC sandbox runtime%s" % (
+        "" if d["ok"] else ": %s. In Windows run  powershell -ExecutionPolicy Bypass -File setup-windows.ps1" % d["reason"]), True))
+    found = osinfo.which("tesseract")
+    out.append((bool(found), "tesseract (reading scans and photos)%s" % (
+        "" if found else ": setup-windows.ps1 installs it (winget install UB-Mannheim.TesseractOCR)"), False))
     return out
 
 
@@ -240,6 +280,9 @@ def start():
 def stop():
     if osinfo.KIND == "mac":
         launchctl("bootout", "gui/%d/%s" % (os.getuid(), LABEL))
+    elif osinfo.KIND == "windows":
+        win_ps("Unregister-ScheduledTask -TaskName 'Orbit' -Confirm:$false -ErrorAction SilentlyContinue")
+        stop_service_run()
     elif os.path.exists(UNIT) and systemd_user():
         subprocess.run(["systemctl", "--user", "stop", "orbit.service"], capture_output=True)
     else:
@@ -287,6 +330,11 @@ def stop_service_run():
         if not service_pid():
             break
         time.sleep(0.5)
+    if osinfo.KIND == "windows":                       # the killed watchdog can't clean up its own file
+        try:                                           # (Windows sees a terminated pid as still alive)
+            os.remove(SERVICE_PID)
+        except OSError:
+            pass
 
 
 def service_cmd():
@@ -359,7 +407,61 @@ def wsl_script():
             % args)
 
 
+# ------------------------------------------------------------------ native Windows service (a scheduled task)
+def win_ps(script):
+    """Runs a PowerShell script on this Windows, encoded so no quoting can break it (tests intercept here)."""
+    import base64
+    exe = osinfo.which("powershell.exe") or "powershell.exe"
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    return subprocess.run([exe, "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
+                          capture_output=True, text=True, timeout=60)
+
+
+def service_pythonw():
+    """pythonw.exe from the owner's Python install (no console windows), per contracts/service-task.md.
+    The live interpreter's own folder first, then PATH. Returns the path even if it's missing: the doctor
+    row (not the task) is what tells the owner to reinstall."""
+    d = os.path.dirname(sys.executable) if sys.executable else ""
+    cand = os.path.join(d, "pythonw.exe")
+    return shutil.which("pythonw.exe") or cand
+
+
+def win_task_script():
+    """The scheduled task 'Orbit': at log on (this owner), hidden, it runs the service wrapper. Built here
+    so tests can assert the contract's fields without touching Task Scheduler."""
+    return ("$a = New-ScheduledTaskAction -Execute '%s' -WorkingDirectory '%s'\n"
+            "$t = New-ScheduledTaskTrigger -AtLogOn\n"
+            "$s = New-ScheduledTaskSettingsSet -Hidden -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries\n"
+            "Register-ScheduledTask -TaskName 'Orbit' -Action $a -Trigger $t -Settings $s -Force | Out-Null"
+            % (os.path.join(engine.HOME, ".runtime", "orbit-service.cmd"), KIT))
+
+
+def start_windows():
+    """Native Windows: the 'Orbit' task (contracts/service-task.md) is written again — idempotent — and
+    started now; at every login Task Scheduler starts it itself. The staffd_alive stamp says it's up."""
+    os.makedirs(os.path.join(engine.HOME, ".runtime"), exist_ok=True)
+    with open(os.path.join(engine.HOME, ".runtime", "orbit-service.cmd"), "w") as fh:
+        fh.write('@echo off\r\nset "STAFFROOM_HOME=%s"\r\n"%s" "%s" service-run\r\n'
+                 % (engine.HOME, service_pythonw(), os.path.join(KIT, "orbit")))
+    r = win_ps(win_task_script())
+    if r.returncode != 0:
+        say("Couldn't create the scheduled task: %s" % (r.stderr.strip()[-300:] or r.stdout.strip()[-300:]))
+        return False
+    win_ps("Start-ScheduledTask -TaskName 'Orbit'")
+    for _ in range(30):
+        if running():
+            break
+        time.sleep(1)
+    if not running():
+        say("The service didn't come up. `orbit logs` shows why (%s)." % os.path.join(engine.HOME, "team", "staffd.out"))
+        return False
+    say("Running. The team starts when you log in from now on. Control panel: `orbit panel`.")
+    return True
+
+
 def start_other():
+    if osinfo.KIND == "windows":
+        return start_windows()
     if osinfo.KIND == "linux" and systemd_user():
         os.makedirs(os.path.dirname(UNIT), exist_ok=True)
         py = sys.executable if sys.executable and os.path.exists(sys.executable) else "/usr/bin/python3"
@@ -741,7 +843,18 @@ def main():
         osinfo.open_url(u)
         return
     if args.cmd == "logs":
-        subprocess.run(["tail", "-n", "60", os.path.join(engine.HOME, "team", "staffd.log")])
+        out = os.path.join(engine.HOME, "team", "staffd.log")
+        if osinfo.KIND == "windows":                     # no `tail` here; the same read is portable
+            import mxc
+            for line in mxc.last_lines(out):
+                say(line)
+            denied = mxc.denials()
+            if denied:
+                say("\nWhat the sandbox refused:")
+                for line in denied:
+                    say("  " + line)
+            return
+        subprocess.run(["tail", "-n", "60", out])
         return
 
     import abilities
