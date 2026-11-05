@@ -19,6 +19,8 @@
   orbit doctor                     check everything the team needs
   orbit doctor --get-voice-model   download the speech model for voice notes and calls (~550 MB)
   orbit doctor --get-whisper       Windows/Linux: build the speech engine (whisper.cpp) for this computer
+  orbit doctor --audit             the MXC runtime's own report of a test command (triage only)
+  orbit sandbox mxc | wsl2         Windows: which way the crew is contained (a guided switch)
   orbit logs                       the service log
 
 Your team's folder is ~/Staff (set STAFFROOM_HOME to move it). The kit itself is this folder.
@@ -45,6 +47,8 @@ import osinfo  # noqa: E402
 LABEL = "com.staffroom.staffd"
 PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LABEL)
 UNIT = os.path.expanduser("~/.config/systemd/user/orbit.service")         # Linux with systemd
+MXC_FIX = ("Repair it by running  powershell -ExecutionPolicy Bypass -File setup-windows.ps1  — or "
+           "switch the crew to WSL2 mode:  orbit sandbox wsl2")          # R4.4's two prerequisites, verbatim
 SERVICE_PID = os.path.join(engine.HOME, "team", "service.pid")             # Windows (WSL), Linux without systemd
 SECRET_NAMES = {"telegram": [("telegram_bot_token", "bot token from @BotFather")],
                 "slack": [("slack_bot_token", "Bot User OAuth Token (xoxb-…)"),
@@ -168,6 +172,15 @@ def platform_checks():
     if osinfo.KIND == "mac":
         return [(True, "macOS (the sandbox and the service)", True)]
     if osinfo.KIND == "windows":
+        import mxc
+        info = mxc.mode_info()
+        if info["sandbox_mode"] == "wsl2":                # the mode gates the whole flow (R4.2, T061)
+            why = info["mxc_unavailable_reason"]
+            return [(False, "the crew runs in WSL2 mode%s. Set Orbit up inside WSL today's way (the kit "
+                    "inside WSL, `sudo sh ~/orbit/setup-linux.sh`, `~/orbit/install.sh`) — docs/SETUP.md, "
+                    "'Windows through WSL'. This Windows side doesn't run the crew any more. Switching "
+                    "back is one command:  orbit sandbox mxc"
+                    % ((" — the reason it switched: %s" % why) if why else ""), True)]
         return windows_checks()
     if not osinfo.SUPPORTED:
         return [(False, "%s isn't supported: Orbit runs on a Mac, on Windows (through WSL) or on Linux" % sys.platform, True)]
@@ -206,8 +219,75 @@ def _win_build():
         return ""
 
 
+def say_data_inventory():
+    """T070/US7: after a mode switch, name both data locations, the copy direction and the ACL/chmod
+    nuance — the owner copies; Orbit never moves a team's files on its own."""
+    win = os.path.join(os.environ.get("USERPROFILE") or os.path.expanduser("~"), "Staff")
+    say("Nothing moved. This computer can hold two separate crew homes, one per mode:")
+    say("  the Windows mode's crew lives in  %s" % win)
+    say("  the WSL2 mode's crew lives in  \\\\wsl.localhost\\<distro>\\home\\<you>\\Staff")
+    say("     (name it exactly with:  wsl -d <distro> -- bash -lc \"echo $HOME/Staff\")")
+    say("To carry a crew across, copy the whole folder yourself: WSL to Windows with Explorer through")
+    say("\\\\wsl.localhost\\\\<distro>\\\\, or Windows to WSL from inside Ubuntu at /mnt/c/Users/<you>/Staff.")
+    say("Then re-protect the secrets once: the Windows tree is guarded by NTFS file permissions (the")
+    say("copy keeps them); the WSL tree by its own `chmod 700 ~/Staff/.secrets` — apply that again on")
+    say("the far side, since NTFS ignores chmod and WSL ignores NTFS ACLs.")
+
+
+def sandbox_probe():
+    """The proof before any crew run (R6.1). A seam: tests stand in for the executor."""
+    import mxc
+    return mxc.probe()
+
+
+def mxc_mode():
+    """The crew's recorded mode on this Windows ("mxc" now, "wsl2" after a switch) — the one store."""
+    import mxc
+    return mxc.mode()
+
+
+def sandbox_switch(target):
+    """The guided mode switch (T060/US4): owner-driven, prerequisites checked first — nothing is
+    bootstrapped silently, and a mode change is written exactly once (R4.1/R4.2)."""
+    import mxc
+    if osinfo.KIND != "windows":
+        say("This switch is for a Windows PC: here the crew already runs in WSL2 the way it always has.")
+        return
+    if target == mxc.mode():
+        say("Already in %s mode. `orbit doctor` shows the details." % target)
+        return
+    if target == "mxc":
+        d = mxc.discover()
+        if not d["ok"]:
+            say("Can't switch to MXC yet: %s" % d["reason"])
+            say(MXC_FIX)
+            return
+        res = sandbox_probe()
+        if res["verdict"] != "usable":
+            say("The sandbox didn't prove itself: %s %s" % (mxc.probe_summary(res), MXC_FIX))
+            say("Nothing changed: the crew won't run without a container.")
+            return
+        mxc.set_mode("mxc", decided_by="owner")
+        say("Switched: the crew's shell commands are contained by MXC on this Windows now.")
+        say("Existing crew data is untouched; verify with `orbit doctor`. `orbit restart` starts the new mode.")
+        say_data_inventory()
+        return
+    if not osinfo.which("wsl.exe"):                       # no silent WSL bootstrapping (R4.5)
+        say("Can't switch to WSL2 yet: WSL isn't installed on this Windows. Nothing changed.")
+        say("Install it once (`wsl --install`, a restart), then follow docs/SETUP.md, 'Windows through WSL',")
+        say("and run this again:  orbit sandbox wsl2")
+        return
+    say("WSL2 mode runs the whole crew inside WSL exactly as before: the kit you already have there,")
+    say("its setup (`setup-linux.sh`, `install.sh`) and its own doctor. The Windows side stops running the crew.")
+    if yes("Switch to WSL2 mode?", False):
+        mxc.set_mode("wsl2", decided_by="owner")
+        say("Switched. Finish the crew side inside WSL (docs/SETUP.md, 'Windows through WSL'); then `orbit doctor` there.")
+        say_data_inventory()
+
+
 def windows_checks():
-    """Native Windows (R3.3): the machine's MXC side, must-fix at setup; every fix is a native command."""
+    """Native Windows mxc-mode checks (R3.3): the machine's MXC side, must-fix at setup; every fix is a
+    native command, and every fix names both ways out (repair MXC | WSL2 mode, R4.4)."""
     import mxc
     out = []
     build = _win_build()
@@ -220,8 +300,14 @@ def windows_checks():
     out.append((bool(pyw and os.path.exists(pyw)), "Python 3 (pythonw.exe runs the service)%s" % (
         "" if pyw and os.path.exists(pyw) else ": reinstall Python, in Windows run  winget install Python.Python.3.12"), True))
     d = mxc.discover()
-    out.append((d["ok"], "the MXC sandbox runtime%s" % (
-        "" if d["ok"] else ": %s. In Windows run  powershell -ExecutionPolicy Bypass -File setup-windows.ps1" % d["reason"]), True))
+    out.append((d["ok"], "the MXC sandbox runtime (wxc-exec.exe)%s" % (
+        "" if d["ok"] else ": %s. %s" % (d["reason"], MXC_FIX)), True))
+    if d["ok"]:
+        res = sandbox_probe()
+        out.append((res["verdict"] == "usable",
+                    "the sandbox proof (an allowed write succeeds; a write outside the crew member's own "
+                    "folder, a secret read, an unapproved connection and an over-time command each refuse)%s"
+                    % ("" if res["verdict"] == "usable" else ": %s %s" % (mxc.probe_summary(res), MXC_FIX)), True))
     found = osinfo.which("tesseract")
     out.append((bool(found), "tesseract (reading scans and photos)%s" % (
         "" if found else ": setup-windows.ps1 installs it (winget install UB-Mannheim.TesseractOCR)"), False))
@@ -461,6 +547,11 @@ def start_windows():
 
 def start_other():
     if osinfo.KIND == "windows":
+        import mxc
+        if mxc.mode() == "wsl2":                          # owner chose the WSL2 way: nothing starts here
+            say("Your crew runs in WSL2 mode: start it inside WSL (the Ubuntu window) with `orbit start`, "
+                "as docs/SETUP.md, 'Windows through WSL' says. Nothing on the Windows side was changed.")
+            return False
         return start_windows()
     if osinfo.KIND == "linux" and systemd_user():
         os.makedirs(os.path.dirname(UNIT), exist_ok=True)
@@ -577,7 +668,20 @@ def setup(no_start=False):
         sys.exit(1)
     bad = [m for ok, m, must in platform_checks() if must and not ok]
     if bad:
-        sys.exit("Fix this first: " + "; ".join(bad))
+        if osinfo.KIND == "windows" and mxc_mode() != "wsl2":     # R4.4: one owner confirmation, recorded;
+            say("The MXC runtime can't run here: %s" % "; ".join(bad))   # never a silent mode switch (SC3)
+            if yes("Switch the crew to WSL2 mode instead? (the same kit, inside WSL —"
+                   " docs/SETUP.md, 'Windows through WSL')", False):
+                import mxc
+                mxc.record_unavailable("; ".join(bad))
+                say("WSL2 mode is recorded as the crew's way on this Windows. Continue inside WSL:")
+                say("install WSL once (`wsl --install`, a restart), then follow docs/SETUP.md,")
+                say("'Windows through WSL', inside the Ubuntu window — the kit, setup-linux.sh and all.")
+                say("Switching back later:  orbit sandbox mxc")
+            else:
+                sys.exit("Fix this first: " + "; ".join(bad))
+        else:
+            sys.exit("Fix this first: " + "; ".join(bad))
     ensure_home()
     reg = engine.registry()
     reg["team_name"] = ask("\nYour team or business name", reg.get("team_name") or "My team")
@@ -713,6 +817,7 @@ def main():
     d = sub.add_parser("doctor")
     d.add_argument("--get-voice-model", action="store_true")
     d.add_argument("--get-whisper", action="store_true")
+    d.add_argument("--audit", action="store_true")
     h = sub.add_parser("hire")
     h.add_argument("--name", required=True); h.add_argument("--role", required=True); h.add_argument("--scope", default="")
     h.add_argument("--supervisor", default=""); h.add_argument("--handle"); h.add_argument("--super", action="store_true")
@@ -731,6 +836,8 @@ def main():
     s.add_argument("name", choices=sorted(SECRET_NAMES))
     g = sub.add_parser("group")
     g.add_argument("chat_id"); g.add_argument("--channel", choices=["telegram", "slack", "discord"])
+    sb = sub.add_parser("sandbox")
+    sb.add_argument("mode", choices=["mxc", "wsl2"])
     args = ap.parse_args()
 
     if args.cmd in (None, "help"):
@@ -738,6 +845,8 @@ def main():
         return
     if args.cmd == "setup":
         return setup(no_start=args.no_start)
+    if args.cmd == "sandbox":
+        return sandbox_switch(args.mode)
     if args.cmd == "demo":
         return demo(stop=args.stop)
     if args.cmd == "start":
@@ -830,6 +939,9 @@ def main():
             os.replace(dst + ".part", dst)
         if args.get_whisper:
             get_whisper()
+        if args.audit:
+            import mxc
+            say(mxc.audit())
         bad = 0
         for ok, msg, must in checks():
             say(("✓ " if ok else ("✗ " if must else "· ")) + msg)

@@ -505,6 +505,28 @@ def last_lines(path, limit=60) -> list:
         return []
 
 
+def audit(emp=None) -> str:
+    """The executor's own audit report on a tiny test command — `orbit doctor --audit` triage only
+    (T042). The executor never gets --audit on a real command (contracts/cc-hook.md)."""
+    d = discover()
+    if not d["ok"]:
+        return "the MXC runtime isn't usable yet: %s" % d["reason"]
+    tmp = tempfile.mkdtemp(prefix="mxc-audit-")
+    try:
+        req_f = os.path.join(tmp, "audit.json")
+        with open(req_f, "w", encoding="utf-8") as fh:
+            json.dump(build_request(emp or {"id": "audit", "workspace": tmp, "name": "audit"},
+                                    "echo audit-ok", tmp), fh)
+        rc, out, _ = ran([d["executor"], EXECUTOR_FLAG_AUDIT, req_f, "echo audit-ok"], timeout=60)
+    finally:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    body = denial_summary(out) if out.strip() else \
+        "no audit details printed (exit %s). The runtime runs; ask support with the evidence files." % rc
+    return ("The executor's own audit of a test command:\n" + body + "\nEvidence files to share "
+            "(logs, not a crew member's work): " + ("\n  ".join(support_bundle_paths()) or "(none yet)"))
+
+
 # ------------------------------------------------------------------ hook entry point
 if __name__ == "__main__":
     if "--hook" in sys.argv:

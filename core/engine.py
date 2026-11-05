@@ -428,6 +428,11 @@ def run(emp: dict, prompt: str, job: str = "chat", session_key: str = None,
     if os.environ.get("STAFFROOM_DEMO"):                  # `orbit demo`: canned answers, no Claude run
         import demo
         return demo.fake_run(emp, prompt, job, session_key, on_step)
+    if osinfo.KIND == "windows" and (registry().get("platform") or {}).get("sandbox_mode") == "wsl2":
+        return {"ok": False,                                              # the mode gates the flow; never
+                "text": "Your crew runs in WSL2 mode: start it inside WSL (the Ubuntu window), not "
+                        "on the Windows side. (See docs/SETUP.md, 'Windows through WSL'.)",
+                "error": "sandbox mode is wsl2", "steps": []}             # switching mid-flight (SC3)
     if not os.path.isfile(os.path.join(GUARD, "hooks", "register.js")):
         return {"ok": False, "text": "My safety guard is missing, so I've stopped myself. Owner: reinstall the kit.",
                 "error": "guard missing", "model": None}

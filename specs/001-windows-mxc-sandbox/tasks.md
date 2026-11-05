@@ -47,31 +47,31 @@
 
 **Goal**: setup/doctor prove both directions before any crew run (spec R6.1â€“R6.3). **Independent test**: probe verdict states exercised via fake executor; quickstart Scenarios A/C.
 
-- [ ] T040 [US6] Implement `core/mxc.py::probe()` â€” min-policy request set per plan D6: positive (allowed write succeeds), negatives (write outside scope, deny_read access, non-allowlisted connect, contained workload terminated at its `timeout_ms` â€” no orphaned sandboxed process) with a probe-result structure per data-model Â§3 (`usable`/`unusable-with-reason`, capability notes incl. per-command startup milliseconds for SC6)
-- [ ] T041 [US6] Wire the probe into `orbit setup` (before service start / first hire) and `orbit doctor` (a must-fix check) per spec R6.1; unusable on native Windows â‡’ refuse unsandboxed and print the two prerequisites (mxc fix or wsl2 fallback) â€” R4.4
-- [ ] T042 [P] [US6] Triage command: `orbit doctor --audit` runs the executor's audit mode on a tiny workload and renders the owner-readable report from T035 â€” explicitly never used on real runs (contract note)
-- [ ] T043 [US6] Unit tests: probe matrix (all pass â‡’ usable; each negative passing â‡’ unusable with matching reason) in `tests/test_mxc.py`
+- [X] T040 [US6] Implement `core/mxc.py::probe()` â€” min-policy request set per plan D6: positive (allowed write succeeds), negatives (write outside scope, deny_read access, non-allowlisted connect, contained workload terminated at its `timeout_ms` â€” no orphaned sandboxed process) with a probe-result structure per data-model Â§3 (`usable`/`unusable-with-reason`, capability notes incl. per-command startup milliseconds for SC6)
+- [X] T041 [US6] Wire the probe into `orbit setup` (before service start / first hire) and `orbit doctor` (a must-fix check) per spec R6.1; unusable on native Windows â‡’ refuse unsandboxed and print the two prerequisites (mxc fix or wsl2 fallback) â€” R4.4
+- [X] T042 [P] [US6] Triage command: `orbit doctor --audit` runs the executor's audit mode on a tiny workload and renders the owner-readable report from T035 â€” explicitly never used on real runs (contract note)
+- [X] T043 [US6] Unit tests: probe matrix (all pass â‡’ usable; each negative passing â‡’ unusable with matching reason) in `tests/test_mxc.py`
 
 ## Phase 6 â€” US5: MXC unavailable â‡’ WSL2 fallback
 
 **Goal**: the unavailability trigger works exactly as specified (spec R4.1/R4.3, SC3). **Independent test**: quickstart Scenario C.
 
-- [ ] T050 [US5] Unavailability handling in `core/mxc.py`/`orbit`: on probe/discovery failure record `platform.decided_by="unavailable"` + reason (data-model Â§1), recommend and (with one confirmation) run the existing WSL2 flow guidance; never switch silently mid-run
-- [ ] T051 [US5] Doctor surfaces the recorded reason + both fix paths (mxc repair | wsl2 mode) verbatim (SC5); golden-string tests in `tests/test_platforms.py`
+- [X] T050 [US5] Unavailability handling in `core/mxc.py`/`orbit`: on probe/discovery failure record `platform.decided_by="unavailable"` + reason (data-model Â§1), recommend and (with one confirmation) run the existing WSL2 flow guidance; never switch silently mid-run
+- [X] T051 [US5] Doctor surfaces the recorded reason + both fix paths (mxc repair | wsl2 mode) verbatim (SC5); golden-string tests in `tests/test_platforms.py`
 
 ## Phase 7 â€” US4: owner bypass/config â‡’ WSL2 mode
 
 **Goal**: explicit mode selection with tradeoffs documented (spec R4.1/R4.2/R4.5). **Independent test**: quickstart Scenario D.
 
-- [ ] T060 [US4] Mode switch UX: a guided doctor-driven switch (powers `wsl2` â‡„ `mxc`) writing `platform` fields via T014 helpers; refuses when the target mode's prerequisites are missing, and for `wsl2` prints the WSL2-side install/doctor steps (existing flow â€” no silent bootstrapping of WSL)
-- [ ] T061 [US4] Guard in `orbit start`/`engine.run`: selected mode gates the whole native-vs-WSL flow (wsl2 on native Windows host tells the owner to run Orbit inside WSL2 today's way) â€” no per-run auto-switch (SC3); tests in `tests/test_platforms.py`
+- [X] T060 [US4] Mode switch UX: a guided doctor-driven switch (powers `wsl2` â‡„ `mxc`) writing `platform` fields via T014 helpers; refuses when the target mode's prerequisites are missing, and for `wsl2` prints the WSL2-side install/doctor steps (existing flow â€” no silent bootstrapping of WSL)
+- [X] T061 [US4] Guard in `orbit start`/`engine.run`: selected mode gates the whole native-vs-WSL flow (wsl2 on native Windows host tells the owner to run Orbit inside WSL2 today's way) â€” no per-run auto-switch (SC3); tests in `tests/test_platforms.py`
 
 ## Phase 8 â€” US7: switch modes later, no data loss
 
 **Goal**: mode changes never lose/corrupt `~/Staff` (spec US7). **Independent test**: quickstart Scenario F.
 
-- [ ] T070 [US7] Doctor mode-inventory check: on switch, print both data locations (`%USERPROFILE%\Staff` vs `\\wsl.localhost\â€¦`), the documented copy direction, and the NTFS-ACL/chmod nuance â€” no automatic moves (research D8)
-- [ ] T071 [P] [US7] Registry transition tests (fields set, no overwrite of unrelated keys, both-mode reload) in `tests/test_mxc.py`
+- [X] T070 [US7] Doctor mode-inventory check: on switch, print both data locations (`%USERPROFILE%\Staff` vs `\\wsl.localhost\â€¦`), the documented copy direction, and the NTFS-ACL/chmod nuance â€” no automatic moves (research D8)
+- [X] T071 [P] [US7] Registry transition tests (fields set, no overwrite of unrelated keys, both-mode reload) in `tests/test_mxc.py`
 
 ## Phase 9 â€” US2: peripherals & speech, native
 

@@ -263,18 +263,109 @@ class Probe(unittest.TestCase):
         self.assertIn("proved both directions", mxc.probe_summary(r))
 
 
+class Audit(unittest.TestCase):
+    """orbit doctor --audit (T042/US6): the executor's own report on a tiny command — triage only,
+    and the audit flag never touches a real contained command."""
+
+    def setUp(self):
+        self.kind = set_kind("windows")
+        self.exPath = mxc.executor_path
+        self.pin = mxc.version_pinned
+        mxc.executor_path = lambda: FAKE_EXECUTOR
+        mxc.version_pinned = lambda: ""
+
+    def tearDown(self):
+        mxc.clear_executor_stub()
+        mxc.executor_path, mxc.version_pinned = self.exPath, self.pin
+        osinfo.KIND = self.kind
+
+    def test_the_audit_probe_runs_through_the_seam_and_reports_in_owner_words(self):
+        seen = []
+        mxc.set_executor_stub(lambda args, env=None, timeout=None:
+                              seen.append(args) or StubResult(1, "violation: reading a denied path"))
+        text = mxc.audit()
+        self.assertTrue(any(s and s[1] == mxc.EXECUTOR_FLAG_AUDIT for s in seen), seen)   # the triage mode
+        self.assertNotIn(mxc.EXECUTOR_FLAG_AUDIT,               # and never on a real contained command
+                         mxc.executor_argv(mxc.EXECUTOR, "req.json", "echo hi"))
+        self.assertIn("The executor's own audit", text)
+        self.assertIn("reading a denied path", text)            # T035's owner-language rendering
+
+    def test_without_a_runtime_the_audit_names_the_prerequisite(self):
+        mxc.executor_path = lambda: None
+        text = mxc.audit()
+        self.assertIn("runtime isn't usable", text)
+        self.assertIn("setup-windows.ps1", text)                # the fix, not a stack trace (SC5)
+
+
+class Registry(unittest.TestCase):
+    """The PlatformMode store as data (T071/A1): the four fields set exactly, unrelated registry keys
+    untouched, and the store reloads in both modes (kind is a per-call switch)."""
+
+    def setUp(self):
+        self.kind = set_kind("windows")
+        reg = engine.registry()
+        self.before = json.loads(json.dumps(reg))            # a deep snapshot: neighbors must survive
+        reg["owner"] = {"name": "Test Owner"}                # an unrelated key, on purpose
+        reg["employees"] = {}
+        engine.save_registry(reg)
+
+    def tearDown(self):
+        engine.save_registry(self.before)
+        osinfo.KIND = self.kind
+
+    def test_set_mode_writes_exactly_the_four_fields(self):
+        mxc.set_mode("wsl2", decided_by="owner")
+        reg = engine.registry()
+        self.assertEqual(set(reg["platform"]),
+                         {"sandbox_mode", "decided_by", "decided_at", "mxc_unavailable_reason"})
+        self.assertEqual(reg["platform"]["sandbox_mode"], "wsl2")
+        self.assertEqual(reg["platform"]["decided_by"], "owner")
+        self.assertTrue(reg["platform"]["decided_at"])       # timestamped (A1)
+        self.assertIsNone(reg["platform"]["mxc_unavailable_reason"])   # no reason: an owner choice
+        self.assertEqual(reg["owner"], {"name": "Test Owner"})         # nothing else moved
+        self.assertEqual(reg.get("network_domains"), self.before.get("network_domains"))
+
+    def test_record_unavailable_puts_the_reason_where_a_reload_finds_it(self):
+        mxc.record_unavailable("the sandbox proof failed: outside_write realized a stray write")
+        reg = engine.registry()
+        self.assertEqual(reg["platform"]["decided_by"], "unavailable")
+        info = mxc.mode_info()                               # reloaded from disk
+        self.assertEqual(info["sandbox_mode"], "wsl2")
+        self.assertEqual(info["decided_by"], "unavailable")
+        self.assertIn("proof failed", mxc.unavailable_reason())
+
+    def test_an_owner_switch_back_clears_the_unavailability_story(self):
+        mxc.record_unavailable("runtime missing")
+        osinfo.KIND = "windows"                              # KIND switches per call in mxc.py
+        mxc.set_mode("mxc", decided_by="owner")
+        self.assertEqual(mxc.unavailable_reason(), "")       # repaired: the old reason stops guiding
+        self.assertEqual(mxc.mode_info()["decided_by"], "owner")
+
+    def test_an_unknown_mode_or_maker_is_refused(self):
+        with self.assertRaises(ValueError):
+            mxc.set_mode("bubblewrap")                       # not a mode
+        with self.assertRaises(ValueError):
+            mxc.set_mode("wsl2", decided_by="wizard")        # not a decision maker (R4.1)
+        with self.assertRaises(ValueError):
+            mxc.set_mode("wsl2", decided_by="unavailable")   # a machine decision needs its reason
+
+
 class Support(unittest.TestCase):
-    """Denial surfacing for support (T035/R6.3): owner words in orbit logs; a bundle of evidence paths."""
+    """Denial surfacing for support (T035/R6.3): owner words in orbit logs; a bundle of evidence paths.
+    The files are planted where the kit itself looks (engine.HOME), so this works in any test process."""
+
+    def plant(self, eid="sara") -> str:
+        ws = os.path.join(engine.HOME, "employees", eid, "state")
+        os.makedirs(ws, exist_ok=True)
+        return ws
 
     def test_refusals_come_out_in_owner_words_without_pass_throughs(self):
-        eid = "sara"
-        ws = os.path.join(TMP, "employees", eid, "state")
-        os.makedirs(ws, exist_ok=True)
+        ws = self.plant()
         with open(os.path.join(ws, "mxc.jsonl"), "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({"decision": "pass-through", "employee": eid, "command": "staff-fetch x"}) + "\n")
-            fh.write(json.dumps({"decision": "allow", "employee": eid, "command": "echo hi",
+            fh.write(json.dumps({"decision": "pass-through", "employee": "sara", "command": "staff-fetch x"}) + "\n")
+            fh.write(json.dumps({"decision": "allow", "employee": "sara", "command": "echo hi",
                                  "request_hash": "abc"}) + "\n")
-            fh.write(json.dumps({"decision": "deny", "employee": eid, "command": "cat .netrc",
+            fh.write(json.dumps({"decision": "deny", "employee": "sara", "command": "cat .netrc",
                                  "reason": "reading a denied path"}) + "\n")
         rows = mxc.denials()
         self.assertEqual(len(rows), 1, rows)
@@ -283,8 +374,7 @@ class Support(unittest.TestCase):
         self.assertIn("reading a denied path", rows[0])
 
     def test_the_bundle_is_evidence_files_not_private_work(self):
-        eid = "sara"
-        ws = os.path.join(TMP, "employees", eid, "state")
+        ws = self.plant()
         os.makedirs(os.path.join(ws, "requests"), exist_ok=True)
         paths = mxc.support_bundle_paths()
         text = " | ".join(paths)
