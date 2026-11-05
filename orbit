@@ -606,14 +606,49 @@ def panel_url():
     return panel.url()
 
 
+def _msvc_ready():
+    """Is the C++ toolchain here (VS Build Tools' C++ workload)? vswhere is the hint the VS installer
+    always leaves — Microsoft's own supported way to ask."""
+    vw = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                      "Microsoft Visual Studio", "Installer", "vswhere.exe")
+    if not os.path.exists(vw):
+        return False
+    try:
+        r = subprocess.run([vw, "-products", "*", "-requires",
+                            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+                           capture_output=True, text=True, timeout=30)
+        return bool(r.stdout.strip())
+    except OSError:
+        return False
+
+
 def get_whisper():
     """Windows/Linux: builds whisper.cpp (the speech engine; Homebrew has it on a Mac) from its latest release
-    into ~/Staff/cache and links whisper-cli into ~/.local/bin. Needs git, cmake and a C++ compiler
-    (setup-linux.sh installs them). A few minutes, once."""
+    into ~/Staff/cache and links whisper-cli into ~/.local/bin (a copy on Windows). Needs git, cmake and
+    a C++ compiler — winget guides the owner on native Windows, setup-linux.sh on Linux. A few minutes, once."""
     import re
     if osinfo.KIND == "mac":
         say("On a Mac: brew install whisper-cpp")
         return
+    if osinfo.KIND == "windows":                          # prebuilt first, then the guided winget path (T080)
+        got = osinfo.which("whisper-cli")
+        if got:
+            say("✓ whisper-cli is already installed (%s)" % got)
+            return
+        needs = [(what, wid) for what, wid, ok in
+                 (("git", "Git.Git", osinfo.which("git")),
+                  ("cmake", "Kitware.CMake", osinfo.which("cmake")),
+                  ("the C++ compiler (VS Build Tools, with the C++ workload)",
+                   "Microsoft.VisualStudio.2022.BuildTools", _msvc_ready())) if not ok]
+        if needs:
+            say("The speech engine builds from source on this PC; first, for each missing piece, in PowerShell:")
+            for what, wid in needs:
+                say("  winget install --id %s -e --accept-package-agreements --accept-source-agreements   (%s)"
+                    % (wid, what))
+            say("(The C++ compiler also needs its C++ tools: add  --override \"--add "
+                "Microsoft.VisualStudio.Workload.VCTools --quiet\")")
+            say("Then run  orbit doctor --get-whisper  again.")
+            sys.exit(1)
     miss = [b for b in ("git", "cmake", "c++") if not osinfo.which(b)]
     if miss:
         sys.exit("Building the speech engine needs %s: sudo sh %s/setup-linux.sh" % (", ".join(miss), KIT))
@@ -631,12 +666,25 @@ def get_whisper():
                     "-DWHISPER_BUILD_EXAMPLES=ON"], cwd=src, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["cmake", "--build", "build", "-j", str(os.cpu_count() or 2), "--config", "Release",
                     "--target", "whisper-cli"], cwd=src, check=True, stdout=subprocess.DEVNULL)
-    exe = os.path.join(src, "build", "bin", "whisper-cli")
-    dst = os.path.expanduser("~/.local/bin/whisper-cli")
+    if osinfo.KIND == "windows":                          # the built engine lands where which() looks
+        dst = os.path.join(osinfo.BIN_DIRS[0] if osinfo.BIN_DIRS else
+                           os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                                        "Microsoft", "WinGet", "Links"), "whisper-cli.exe")
+    else:
+        dst = os.path.expanduser("~/.local/bin/whisper-cli")
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    exe = next((c for c in (os.path.join(src, "build", "bin", "whisper-cli"),
+                            os.path.join(src, "build", "bin", "Release", "whisper-cli.exe"),
+                            os.path.join(src, "build", "bin", "whisper-cli.exe")) if os.path.exists(c)), None)
+    if not exe:
+        sys.exit("The build finished but whisper-cli isn't where it's expected this time; look in "
+                 "%s\\build\\bin and, if it's there, put it next to the other tools." % src)
     if os.path.lexists(dst):
         os.remove(dst)
-    os.symlink(exe, dst)
+    if osinfo.KIND == "windows":
+        shutil.copy2(exe, dst)                           # a copy: symlinks need admin rights here
+    else:
+        os.symlink(exe, dst)
     say("✓ whisper-cli installed (%s)" % dst)
 
 

@@ -77,9 +77,9 @@
 
 **Goal**: calls, voice notes, notifications, panel/browser flows work natively (spec R3.4/R3.5). **Independent test**: doctor checks pass on a clean Win11 box; a live call + voice note round-trip.
 
-- [ ] T080 [US2] `orbit::get_whisper()` native-Windows branch per plan D5: prebuilt-if-available else guided winget (git, cmake, VS Build Tools C++) + existing whisper.cpp build flow; doctor messaging per quickstart
-- [ ] T081 [P] [US2] `core/calls.py::ready()` native branch: use `sys.executable` (no `/mnt/c` cwd, no `win_python` hop) and native Windows mic messaging; verify capture path(s) exercised via fake subprocess in `tests/test_platforms.py`
-- [ ] T082 [P] [US2] Sweep remaining WSL bridges for native short-circuits: `osinfo.open_url`/`notify` verified in T012 panel/`demo` consumers; `tesseract`/`ffmpeg` doctor fix strings point at winget/`setup-windows.ps1`
+- [X] T080 [US2] `orbit::get_whisper()` native-Windows branch per plan D5: prebuilt-if-available else guided winget (git, cmake, VS Build Tools C++) + existing whisper.cpp build flow; doctor messaging per quickstart
+- [X] T081 [P] [US2] `core/calls.py::ready()` native branch: use `sys.executable` (no `/mnt/c` cwd, no `win_python` hop) and native Windows mic messaging; verify capture path(s) exercised via fake subprocess in `tests/test_platforms.py`
+- [X] T082 [P] [US2] Sweep remaining WSL bridges for native short-circuits: `osinfo.open_url`/`notify` verified in T012 panel/`demo` consumers; `tesseract`/`ffmpeg` doctor fix strings point at winget/`setup-windows.ps1`
 
 ## Phase 10 â€” US8: regression + CI + release polish
 

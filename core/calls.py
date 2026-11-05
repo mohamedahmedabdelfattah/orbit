@@ -92,6 +92,14 @@ def ready():
         if not py or not _py_ok(py)[0]:
             return False, WIN_SETUP
         return True, ""
+    if osinfo.KIND == "windows":                          # native (T081): this very Python, this sound card,
+        ok, why = _py_ok([sys.executable])                # no /mnt/c hop, no sound-server story (WASAPI is built in)
+        if not ok:
+            if "No module" in why:
+                return False, ("Live calls need two Python packages — in PowerShell:  "
+                               "py -m pip install soundcard numpy")
+            return False, "Live calls couldn't reach the sound card on this PC: %s" % why
+        return True, ""
     if osinfo.KIND != "mac":
         ok, why = _py_ok([sys.executable])
         if not ok:
