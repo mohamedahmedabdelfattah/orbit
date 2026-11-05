@@ -6,7 +6,8 @@
 # It installs: Python 3 (your user only; it also gives the service its pythonw.exe), git, ffmpeg (voice
 # notes), tesseract with Arabic (reading scans and photos), the MXC sandbox runtime (the thing that keeps
 # your crew in its own folder and on the sites you approve) and the Python packages the kit uses.
-# Windows 11 22H2 or newer is required for the sandbox. Nothing system-wide changes; safe to run again.
+# Windows 11 24H2 with the current ProcessContainer updates (or newer) is required for the sandbox.
+# Nothing system-wide changes; safe to run again.
 param([switch]$Yes = $false)
 $ErrorActionPreference = "Stop"
 $KIT = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -14,21 +15,22 @@ $KIT = Split-Path -Parent $MyInvocation.MyCommand.Path
 Function Step($n, $msg) { Write-Host "`n$n  $msg" }
 
 # ------------------------------------------------------------------------
-# The MXC sandbox runtime, pinned now so a later release can't drift in unannounced.
-# Filled at packaging time with the official artifact's release, URL and checksum;
-# Get-FileHash must match exactly, or the runtime is not installed.
-$MXC_VERSION = ""
-$MXC_URL     = ""
-$MXC_SHA256  = ""
+# The MXC sandbox runtime, pinned so a later release cannot drift in unannounced. Microsoft's
+# official Node SDK package includes the signed native executors; Orbit extracts only wxc-exec.exe
+# and does not install Node. Get-FileHash and Authenticode must both pass before the binary is kept.
+$MXC_VERSION = "1.0.1"
+$MXC_SCHEMA_VERSION = "1.0.0"
+$MXC_URL     = "https://registry.npmjs.org/@microsoft/mxc-sdk/-/mxc-sdk-1.0.1.tgz"
+$MXC_SHA256  = "416D9607C9D4652395D95C3D9C5F5605F1F2F845DA1A63228BEE41B7392CEF49"
 # ------------------------------------------------------------------------
 
 Function Have($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
-# 0/ the Windows itself: process containers need 22H2 or newer
+# 0/ the Windows itself: MXC's ProcessContainer support starts on updated 24H2 builds
 $build = [version](Get-CimInstance Win32_OperatingSystem).Version
-if ($build -lt [version]"10.0.22621") {
+if ($build -lt [version]"10.0.26100") {
     Step "0/4" "Windows $build"
-    Write-Host "   Orbit's sandbox needs Windows 11 22H2 or newer (this is $build)."
+    Write-Host "   Orbit's sandbox needs Windows 11 24H2 with current updates or newer (this is $build)."
     Write-Host "   Without it the crew runs in WSL2 mode instead: install WSL and use the"
     Write-Host "   Linux steps in docs/SETUP.md ('Windows through WSL')."
     exit 1
@@ -44,37 +46,66 @@ foreach ($id in @("Python.Python.3.12", "Git.Git", "Gyan.FFmpeg", "UB-Mannheim.T
         exit 1
     }
 }
+$PYTHON = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+if (-not $PYTHON) {
+    $PYTHON = Get-ChildItem (Join-Path $env:LOCALAPPDATA "Programs\Python\Python*\python.exe") -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $PYTHON) {
+    Write-Host "   Python was installed but isn't visible yet. Open a new PowerShell window and run this script again."
+    exit 1
+}
 
 Step "2/4" "The MXC sandbox runtime (the boundary for every shell command your crew runs)…"
 $VENDOR = Join-Path $KIT "vendor\mxc"
 New-Item -ItemType Directory -Force -Path $VENDOR | Out-Null
-if (-not $MXC_URL) {
-    Write-Host "   The packaged runtime isn't pinned in this copy (MXC_URL is empty)."
-    Write-Host "   Put the executor (wxc-exec.exe) from the official MXC release into:"
-    Write-Host "     $VENDOR"
-    Write-Host "   and store its version in:  $VENDOR\version.txt"
+$EXE = Join-Path $VENDOR "wxc-exec.exe"
+$VERSION_FILE = Join-Path $VENDOR "version.txt"
+$SCHEMA_FILE = Join-Path $VENDOR "schema-version.txt"
+$installed = if (Test-Path $VERSION_FILE) { (Get-Content $VERSION_FILE -Raw).Trim() } else { "" }
+$signed = if (Test-Path $EXE) { (Get-AuthenticodeSignature $EXE).Status -eq "Valid" } else { $false }
+if ($installed -eq $MXC_VERSION -and $signed) {
+    Write-Host "   MXC runtime v$MXC_VERSION is already installed and signed."
 } else {
-    $EXE = Join-Path $VENDOR "wxc-exec.exe"
-    Invoke-WebRequest -Uri $MXC_URL -OutFile $EXE -UseBasicParsing
-    $hash = (Get-FileHash $EXE -Algorithm SHA256).Hash.ToLower()
-    if ($hash -ne $MXC_SHA256.ToLower()) {
-        Remove-Item $EXE
+    $ARCHIVE = Join-Path $env:TEMP "orbit-mxc-$MXC_VERSION-$PID.tgz"
+    $STAGE = Join-Path $env:TEMP "orbit-mxc-$MXC_VERSION-$PID"
+    Invoke-WebRequest -Uri $MXC_URL -OutFile $ARCHIVE -UseBasicParsing
+    $hash = (Get-FileHash $ARCHIVE -Algorithm SHA256).Hash.ToUpperInvariant()
+    if ($hash -ne $MXC_SHA256.ToUpperInvariant()) {
+        Remove-Item $ARCHIVE -Force
         Write-Host "   The downloaded runtime doesn't match the pinned checksum (got $hash)."
         Write-Host "   Nothing was kept. Check the release notes, then run this again."
         exit 1
     }
-    Set-Content -Path (Join-Path $VENDOR "version.txt") -Value $MXC_VERSION
-    Write-Host "   MXC runtime v$MXC_VERSION installed (checksum verified)."
+    $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") { "arm64" } else { "x64" }
+    New-Item -ItemType Directory -Force -Path $STAGE | Out-Null
+    try {
+        tar -xzf $ARCHIVE -C $STAGE "package/bin/$arch/wxc-exec.exe"
+        if ($LASTEXITCODE -ne 0) { throw "Windows tar could not extract the MXC runtime" }
+        $downloaded = Join-Path $STAGE "package\bin\$arch\wxc-exec.exe"
+        if ((Get-AuthenticodeSignature $downloaded).Status -ne "Valid") {
+            throw "the extracted MXC executor does not have a valid Microsoft signature"
+        }
+        Copy-Item $downloaded $EXE -Force
+        [IO.File]::WriteAllText($VERSION_FILE, "$MXC_VERSION`n", (New-Object Text.UTF8Encoding $false))
+        [IO.File]::WriteAllText($SCHEMA_FILE, "$MXC_SCHEMA_VERSION`n", (New-Object Text.UTF8Encoding $false))
+    } finally {
+        Remove-Item $ARCHIVE -Force -ErrorAction SilentlyContinue
+        Remove-Item $STAGE -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "   MXC runtime v$MXC_VERSION installed (checksum and Microsoft signature verified)."
 }
 
 Step "3/4" "Python packages for the page reader, the browser, the chat channels and documents (your user only)…"
-python -m pip install --user --quiet --upgrade requests beautifulsoup4 playwright websocket-client pypdf
-python -m playwright install chromium
+# This is the native equivalent of install.sh's Python step: pypdf powers the document pipeline, and
+# Playwright's package plus Chromium powers the same headless-browser flow on every platform.
+& $PYTHON -m pip install --user --quiet --upgrade requests beautifulsoup4 playwright websocket-client pypdf
+& $PYTHON -m playwright install chromium
 
 Step "4/4" "Next steps (in this window)…"
 Write-Host "   1. Claude Code, if the crew's brain isn't on this PC yet: git clone or download from"
 Write-Host "      https://claude.com/claude-code, then run  claude auth login  with your own account."
-Write-Host "   2. Set up the team:  python `"$KIT\orbit`" setup"
+Write-Host "   2. Set up the team:  & `"$PYTHON`" `"$KIT\orbit`" setup"
 Write-Host "      (checks, your business, your chat bot, your first hire)."
 Write-Host ""
 Write-Host "Done. If anything failed, rerun this script; each step is safe to repeat."

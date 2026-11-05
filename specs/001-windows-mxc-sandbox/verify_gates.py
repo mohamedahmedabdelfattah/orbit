@@ -74,17 +74,23 @@ def cmd_phase(name):
 
 
 def cmd_full():
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", STAFF_TEST_OCR="0")
-    proc = subprocess.run([sys.executable, "-m", "unittest"] + ALL_MODULES,
-                          cwd=REPO, env=env, capture_output=True, timeout=1100,
-                          encoding="utf-8", errors="replace")
-    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    m = RAN.search(out)
-    sel = int(m.group(1)) if m else None
-    if proc.returncode == 0 and sel and sel > 0 and "FAILED" not in out:
-        print("full-suite verification passed")
-        sys.exit(0)
-    fail(["full suite: exit=%s selected=%s\n%s" % (proc.returncode, sel, out[-2500:])])
+    # Test modules own process-wide STAFFROOM_HOME/module state, so run them separately just as CI does.
+    # Native Windows has focused fake-executor/platform slices; the POSIX-only shim/audio suites run in
+    # the unchanged macOS, Linux and WSL jobs in tests.yml.
+    runs = ([('tests.test_mxc', None), ('tests.test_platforms', ['Windows']),
+             ('tests.test_platforms', ['.Mode.'])] if os.name == 'nt' else
+            [(module, None) for module in ALL_MODULES])
+    total, diag = 0, []
+    for module, filters in runs:
+        ok, selected, tail = run_unittest(module, filters)
+        if not ok:
+            diag.append("%s -k %r: selected=%s\n%s" % (module, filters, selected, tail))
+        else:
+            total += selected
+    if diag:
+        fail(diag)
+    print("full-suite verification passed (%d platform-appropriate tests)" % total)
+    sys.exit(0)
 
 
 def cmd_ci():

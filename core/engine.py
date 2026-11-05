@@ -71,6 +71,20 @@ BASE_DENIED = ["Bash(git push *)", "Bash(git push)", "Bash(git remote *)", "Bash
                "Bash(wsl.exe *)", "Bash(schtasks.exe *)", "Edit(profile.json)", "Write(profile.json)"]
 
 
+def platform_allowed() -> list:
+    """The same tool surface, with Claude's native PowerShell tool replacing Git Bash on Windows."""
+    return ([t for t in BASE_ALLOWED if t != "Bash"] + ["PowerShell"]
+            if osinfo.KIND == "windows" else BASE_ALLOWED)
+
+
+def platform_denied() -> list:
+    """Mirror existing shell-family denials onto PowerShell without changing other platforms."""
+    if osinfo.KIND != "windows":
+        return BASE_DENIED
+    return BASE_DENIED + [rule.replace("Bash(", "PowerShell(", 1) for rule in BASE_DENIED
+                          if rule.startswith("Bash(")]
+
+
 # ------------------------------------------------------------------ registry
 def registry() -> dict:
     try:
@@ -211,6 +225,10 @@ def clean_env(emp: dict) -> dict:
     env["HOME"] = H
     env["PATH"] = os.pathsep.join([BIN, os.path.dirname(resolve_claude())] + osinfo.path_dirs())
     env["CLAUDE_CODE_FORK_SUBAGENT"] = "0"              # no hidden conversation-copying subagents
+    if osinfo.KIND == "windows":
+        # MXC 1.0 ProcessContainer cannot initialize MSYS2/Git Bash (microsoft/mxc#1061). Claude's
+        # native PowerShell tool is the contained Windows shell; a stray Bash call still fails closed.
+        env["CLAUDE_CODE_USE_POWERSHELL_TOOL"] = "1"
     env["STAFF_EMPLOYEE"] = emp["id"]
     env["STAFF_WORKSPACE"] = emp["workspace"]
     env["STAFFROOM_HOME"] = HOME
@@ -262,6 +280,28 @@ def settings_json(emp: dict, unsandboxed: list) -> str:
     return json.dumps(sandbox_blob(emp, unsandboxed))
 
 
+def _remove_skill_link(path: str):
+    """Remove one skills-bundle link without following its directory target."""
+    is_junction = getattr(os.path, "isjunction", lambda _path: False)
+    if os.name == "nt" and (is_junction(path) or (os.path.islink(path) and os.path.isdir(path))):
+        os.rmdir(path)
+    else:
+        os.unlink(path)
+
+
+def _make_skill_link(source: str, path: str):
+    """Link a skill directory. Windows junctions work for ordinary, non-admin owners."""
+    if os.name != "nt":
+        os.symlink(source, path)
+        return
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    made = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", path, source],
+                          capture_output=True, text=True, creationflags=flags)
+    if made.returncode != 0:
+        why = (made.stderr or made.stdout or "Windows could not create the directory junction").strip()
+        raise OSError(why)
+
+
 def skills_plugin(emp: dict, wanted: list) -> str:
     """The employee's skills bundle (~/Staff/.runtime/<id>/skills): links to the kit's playbooks for its
     abilities, its own learned skills (<workspace>/skills) and the team's shared ones (team/skills).
@@ -281,11 +321,11 @@ def skills_plugin(emp: dict, wanted: list) -> str:
     for name in os.listdir(sk):
         p = os.path.join(sk, name)
         if name not in links or os.path.realpath(p) != os.path.realpath(links[name]):
-            os.unlink(p)
+            _remove_skill_link(p)
     for name, src in links.items():
         p = os.path.join(sk, name)
         if not os.path.lexists(p):
-            os.symlink(src, p)
+            _make_skill_link(src, p)
     return root
 
 
@@ -309,9 +349,9 @@ def command(emp: dict, model: str) -> list:
            "--settings", settings_json(emp, gateways), "--plugin-dir", GUARD, "--plugin-dir", bundle,
            "--append-system-prompt", "Paths: your team folder (~/Staff in the handbook) is %s; the kit (the handbook, "
            "skills and tools) is %s. %s" % (HOME, KIT, abilities.prompt(emp["id"])),
-           "--allowedTools", *([t for t in BASE_ALLOWED if t not in block] + allow + emp.get("extra_tools", []) +
-                               ["mcp__%s" % n for n in servers]),
-           "--disallowedTools", *(BASE_DENIED + block + emp.get("extra_denied", []))]
+           "--allowedTools", *([t for t in platform_allowed() if t not in block] + allow + emp.get("extra_tools", []) +
+                                ["mcp__%s" % n for n in servers]),
+           "--disallowedTools", *(platform_denied() + block + emp.get("extra_denied", []))]
     for extra in emp.get("add_dirs", []):
         cmd += ["--add-dir", os.path.expanduser(extra)]
     if "act_in_browser" in abilities.effective(emp["id"]):   # the owner's own Chrome, through Claude in Chrome
@@ -550,7 +590,7 @@ def claude_session(emp_id: str) -> dict:
     sandbox, hooks = blob["sandbox"], blob.get("hooks")
     env = clean_env(emp)
     deny = []
-    for rule in BASE_DENIED + block + emp.get("extra_denied", []):
+    for rule in platform_denied() + block + emp.get("extra_denied", []):
         rule = re.sub(r"^Write\(", "Edit(", rule)          # Edit rules cover every file-editing tool
         if rule not in deny:
             deny.append(rule)
@@ -568,7 +608,7 @@ def claude_session(emp_id: str) -> dict:
             json.dump({"mcpServers": servers}, fh, indent=2)
     elif os.path.exists(mcp_path):
         os.remove(mcp_path)
-    perms = {"allow": [t for t in BASE_ALLOWED if t not in block] + allow + emp.get("extra_tools", []) +
+    perms = {"allow": [t for t in platform_allowed() if t not in block] + allow + emp.get("extra_tools", []) +
              ["mcp__%s" % n for n in servers], "deny": deny}
     if autonomous(emp):                                    # the owner's choice: no stops; the sandbox is the boundary
         perms["defaultMode"] = "bypassPermissions"
@@ -578,8 +618,10 @@ def claude_session(emp_id: str) -> dict:
         "sandbox": sandbox,
         "permissions": perms,
         "env": {k: env[k] for k in ("STAFF_EMPLOYEE", "STAFF_WORKSPACE", "STAFFROOM_HOME", "STAFFROOM_KIT",
-                                     "STAFF_ABILITIES", "STAFF_BROWSER_SITES", "PATH")},
+                                      "STAFF_ABILITIES", "STAFF_BROWSER_SITES", "PATH")},
     })
+    if osinfo.KIND == "windows":
+        local["env"]["CLAUDE_CODE_USE_POWERSHELL_TOOL"] = "1"
     if hooks:                                           # native Windows: the PreToolUse containment hook
         local["hooks"] = hooks
     os.makedirs(os.path.dirname(path), exist_ok=True)

@@ -1,6 +1,11 @@
-# Orbit's tests on every push: the Mac, Linux (Ubuntu), and Windows through WSL 2. The Linux and Windows
-# jobs also install Orbit the way a new user would (Claude Code installed, not signed in: no Claude run
-# here), check the sandbox really works, read a real scan with tesseract, and start the service.
+# Orbit's tests on every push: the Mac, Linux (Ubuntu), native Windows, and Windows through WSL 2. The
+# Linux and Windows jobs also install Orbit the way a new user would (Claude Code installed, not signed
+# in: no Claude run here), check the sandbox really works, read a real scan with tesseract, and start
+# the service.
+# NOTE (MXC, T090): MXC containment itself is not part of automated testing — CI runners are Windows
+# Server, and MXC requires Windows 11 hosts. The fake-executor stubs cover Orbit-side logic; the native
+# `windows` unit job below runs the suite with no runtime present. For on-demand real-host validation
+# see specs/001-windows-mxc-sandbox/quickstart.md.
 name: tests
 on:
   push:
@@ -17,7 +22,7 @@ jobs:
       - name: Unit tests
         env:
           STAFF_TEST_OCR: "0"
-        run: for t in test_core test_channels test_tools test_calls test_platforms; do python3 -m unittest tests.$t || exit 1; done
+        run: for t in test_core test_channels test_tools test_calls test_platforms test_mxc; do python3 -m unittest tests.$t || exit 1; done
 
   linux:
     runs-on: ubuntu-24.04
@@ -28,7 +33,7 @@ jobs:
       - name: Python packages
         run: python3 -m pip install --user --quiet --break-system-packages requests beautifulsoup4 pypdf numpy soundcard websocket-client
       - name: Unit tests
-        run: for t in test_core test_channels test_tools test_calls test_platforms; do python3 -m unittest tests.$t || exit 1; done
+        run: for t in test_core test_channels test_tools test_calls test_platforms test_mxc; do python3 -m unittest tests.$t || exit 1; done
       - name: The sandbox starts here (bubblewrap, as Claude Code uses it)
         run: bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent true && echo "sandbox ok"
       - name: Reading a real scan with tesseract
@@ -56,6 +61,27 @@ jobs:
       - name: Building the speech engine (whisper.cpp)
         run: ./orbit doctor --get-whisper || true; test -x "$HOME/.local/bin/whisper-cli"
 
+  # Native Windows unit job (T090): unit suite only, with the fake-executor stubs — no MXC runtime is
+  # installed and no real container runs (see the note at the top about quickstart.md validation).
+  windows-unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Python packages
+        run: python -m pip install --quiet --user requests beautifulsoup4 pypdf numpy soundcard websocket-client
+      - name: Unit tests
+        env:
+          STAFF_TEST_OCR: "0"
+          PYTHONUTF8: "1"
+        shell: pwsh
+        run: |
+          python -m unittest tests.test_mxc
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -m unittest tests.test_platforms -k Windows
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -m unittest tests.test_platforms -k .Mode.
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
   windows:
     runs-on: windows-latest
     defaults:
@@ -78,7 +104,7 @@ jobs:
       - name: Copy the kit into Linux's own disk (as git clone does; the Windows drive ignores file modes)
         run: cp -r "$PWD" "$HOME/orbit"
       - name: Unit tests
-        run: cd "$HOME/orbit" && for t in test_core test_channels test_tools test_calls test_platforms; do python3 -m unittest tests.$t || exit 1; done
+        run: cd "$HOME/orbit" && for t in test_core test_channels test_tools test_calls test_platforms test_mxc; do python3 -m unittest tests.$t || exit 1; done
       - name: The sandbox starts inside WSL
         run: bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent true && echo "sandbox ok"
       - name: Windows programs are reachable from Linux (what the service and the browser use)

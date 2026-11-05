@@ -37,10 +37,15 @@ KIND = os.environ.get("ORBIT_OS") or _kind()          # ORBIT_OS: tests pretend 
 if KIND == "windows":
     import glob as _glob
     DEVICE, SUPPORTED, NAME = "PC", True, "Windows"
-    _WINDIRS = [os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links"),
-                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")]
+    _LOCAL_PROGRAMS = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")
+    _WINDIRS = os.environ.get("PATH", "").split(os.pathsep)
+    _WINDIRS += [os.path.dirname(sys.executable),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Links"),
+                 _LOCAL_PROGRAMS]
+    _WINDIRS += _glob.glob(os.path.join(_LOCAL_PROGRAMS, "Python", "Python*"))
+    _WINDIRS += _glob.glob(os.path.join(_LOCAL_PROGRAMS, "Python", "Python*", "Scripts"))
     _WINDIRS += _glob.glob(os.path.join(os.environ.get("APPDATA", ""), "Python", "*", "Scripts"))
-    BIN_DIRS = [d for d in _WINDIRS if d and os.path.isdir(d)]
+    BIN_DIRS = list(dict.fromkeys(os.path.normpath(d) for d in _WINDIRS if d and os.path.isdir(d)))
 else:
     DEVICE = {"mac": "Mac", "wsl": "PC"}.get(KIND, "computer")
     SUPPORTED = KIND in ("mac", "wsl", "linux")

@@ -1,6 +1,15 @@
 __pycache__/
 *.pyc
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
 .DS_Store
+Thumbs.db
 *.tmp
+*.swp
+.vscode/
+.idea/
 node_modules/
 docs/video/

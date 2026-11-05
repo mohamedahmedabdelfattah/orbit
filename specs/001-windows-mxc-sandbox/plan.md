@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | Runtime | Python 3.9-compatible, no new heavy dependencies | Orbit is a script kit; `wxc-exec` is an external binary, not a Python lib |
 | Host OS | Windows 11 x64/ARM64 (ProcessContainer backend), plus existing mac/Linux/WSL2 unchanged | Discovery decides; fallback per spec R4 |
-| MXC consumption | Official MXC runtime artifacts executing versioned stable-schema JSON container-creation requests (the project's documented SDK-free path — "use when the SDK cannot be embedded in your app"); executor binary `wxc-exec.exe` on Windows | Avoids requiring Node/Rust toolchains on the owner's machine |
+| MXC consumption | Official signed `@microsoft/mxc-sdk` 1.0.1 artifact (contains the standalone executor), executing exact stable-schema 1.0.0 JSON requests through `wxc-exec.exe` | Installer extracts the binary only; owners need no Node/Rust toolchain |
 | Policy model | Single translation layer Orbit-side: Orbit policy (deny-read/allow-write/network allowlist) → MXC request JSON | Same policy structure already exists in `engine.settings_json()` |
 | Service | Windows Scheduled Task (logon trigger) running `pythonw.exe … orbit service-run`; existing stamp-file liveness (`staffd_alive`) reused | Replaces WMI/`wsl.exe` bridging; macOS launchd / Linux systemd paths untouched |
 | Installer | New `setup-windows.ps1` (PowerShell, winget-based) parallel to `install.sh` + `setup-linux.sh` | Owner runs once from a PowerShell window; no admin unless a tool requires it |
@@ -22,7 +22,7 @@
 ## Architecture Decisions (summary — full rationale in research.md)
 
 1. **Contain per shell command; never wrap the agent.** On native Windows, Claude Code's own sandbox does not exist, and changing how the agent runs is out of scope (owner decision). Orbit integrates through Claude Code's documented hook surface — a `PreToolUse` hook matching `Bash|PowerShell` rewrites each shell command into an MXC executor invocation before it runs. The agent process, file/web tools, and permission behavior remain exactly as on macOS/Linux. Orbit also omits the `failIfUnavailable` sandbox requirement on native Windows so the agent still starts (that requirement remains for mac/Linux/WSL2).
-2. **Executor-binary (JSON request) consumption** instead of embedding a Node/Rust SDK: matches Orbit's "no toolchains on the owner's machine" posture; the stable schema is versioned and documented by Microsoft. Requests are generated **per shell command** by a fast Orbit-side helper invoked from the hook.
+2. **Executor-binary (JSON request) consumption** instead of embedding a Node/Rust SDK: matches Orbit's "no toolchains on the owner's machine" posture; the installer checksum-verifies the official package, verifies Microsoft's Authenticode signature, and extracts only `wxc-exec.exe`. Exact stable-schema requests are generated **per shell command**. Because MXC accepts CIDRs rather than durable DNS names, the helper also owns a short-lived deny-direct HTTP/S domain proxy for that command.
 3. **One new core module** owns the policy translation, request generation, hook script, and probe, so `engine.py` stays the single policy source and the platform layer stays thin.
 4. **Mode selection lives in the Orbit registry** (next to other owner-owned settings), set at setup, changeable by a doctor-guided command; native Windows defaults to MXC, degrades to a `wsl2` recommendation only on the spec's two triggers.
 5. **Windows Scheduled Task for the service**, with the existing `staffd_alive` stamp file as liveness (`orbit status`/doctor work unchanged conceptually).
@@ -33,7 +33,7 @@
 
 See [research.md](./research.md). Open items resolved at plan time:
 
-- D1 MXC consumption mode (executor + stable schema) — resolved, with distribution-artifact verification listed as an implementation-time check against the current release.
+- D1 MXC consumption mode (executor + stable schema) — resolved; implementation validation pinned signed runtime 1.0.1 and exact stable schema 1.0.0.
 - D2 Policy translation table Orbit→MXC (filesystem/network/command surfaces) — resolved.
 - D3 Service and installer mechanics on native Windows — resolved.
 - D4 Fallback semantics and mode persistence — resolved per spec R4.
@@ -57,7 +57,7 @@ N/A (no constitution).
 | ProcessContainer capabilities vary by Windows build (network host filtering, Learning Mode) | Capability probe at setup maps to spec R6.2; unsupported → WSL2 recommendation |
 | Per-command container startup may add noticeable latency | SC6 bound (~1 s/command); probe measures it; if a build is slow, doctor reports and the batch policy can group long chains |
 | Hook-returned command change interacts with auto-mode classifier review | Hook returns `permissionDecision: "allow"` together with `updatedInput` (documented auto-approve pairing); deny/ask rules still evaluate the rewritten command |
-| MXC distribution method may change between releases | Vendor/install step verifies artifact checksum & schema version at install time (task T020) |
+| MXC distribution method may change between releases | Installer pins the official package SHA-256, verifies Microsoft's Authenticode signature, records runtime/schema versions, and doctor capability-probes the executor (T020/T098) |
 | MSVC build toolchain needed for whisper on Windows | Guided winget install of Build Tools as an explicit doctor step (docs-first, optional feature) |
 | Data transition when switching modes (WSL2 → native) | Doctor warns + documented copy direction; no silent data moves (spec Out of Scope) |
 | CI can't exercise real MXC | Not a gate (owner decision 2026-11-04): automated testing covers everything with the fake-executor seam; a comment/hint notes MXC real-host behavior is outside automated testing — see "Why CI doesn't test real MXC" below |

@@ -5,6 +5,9 @@
 **Your AI workforce. In motion.**
 Build your team. Assign missions. Get things done.
 
+**New in 0.8.0:** Orbit runs natively on Windows 11. Microsoft Execution Containers (MXC) keep
+each crew shell command contained; WSL2 remains available as an explicit fallback.
+
 Add your first AI crew member in two minutes and watch it do a real piece of your work. It runs on
 your own computer (a Mac, a Windows PC or Linux), on the Claude plan you already have (no API bill), and it can't spend, post or message
 anyone but you. Early: built in the open, tested by a few people; tell us what breaks.
@@ -34,8 +37,8 @@ the work you give them are **missions**; **Launch** starts one.
 
 ## Get started
 
-**You need:** a Mac, a Windows PC (Windows 11 22H2 or newer; Windows 10 and even 11 without the
-sandbox follow the WSL fallback, below) or a Linux PC, and a paid Claude plan (Pro or Max).
+**You need:** a Mac, a Windows PC (Windows 11 24H2 with current updates or newer; older or unsupported
+Windows builds follow the WSL fallback below) or a Linux PC, and a paid Claude plan (Pro or Max).
 That's what your employees run on; nothing else is billed. Every feature works on all three; the few
 setup differences are below.
 
@@ -44,8 +47,8 @@ setup differences are below.
 > Set up Orbit for me: clone https://github.com/BasemTarekkamal/orbit into ~/orbit, then read ~/orbit/SETUP.md and follow it.
 
 Claude installs everything, says what each step does, and opens your control panel. On Windows it
-runs one PowerShell installer (`setup-windows.ps1`) — no Linux, no restarts (below); only on older
-Windows does it turn on WSL and type your password where one is needed. There you say who
+runs one PowerShell installer (`setup-windows.ps1`) — no Linux, no restarts (below); only when MXC
+is unavailable does it turn on WSL and type your password where one is needed. There you say who
 you are and what your business does, pick a job, and your own Claude interviews you about it: a few
 tap-to-answer questions written for that job (your channels, goals, tone, what they may do alone,
 what access you'd give). It turns your answers into the crew member's card: responsibilities, first
@@ -58,7 +61,7 @@ your new crew member, who introduces themselves and gets to work.
 git clone https://github.com/BasemTarekkamal/orbit ~/orbit && ~/orbit/install.sh
 ```
 
-**On Windows** (Windows 11 22H2 or newer), in a PowerShell window:
+**On Windows** (Windows 11 24H2 with current updates or newer), in a PowerShell window:
 
 ```powershell
 cd where\the\orbit\folder\is
@@ -281,7 +284,7 @@ orbit group <chat id> [--channel telegram|slack|discord]   the team chat
 
 - **Mac:** macOS, [Claude Code](https://claude.com/claude-code) signed in with your Claude account, and
   Python 3.9 or newer (the one macOS ships is fine). Optional: Homebrew for voice notes (`ffmpeg`, `whisper-cpp`).
-- **Windows (native, primary):** Windows 11 22H2 or newer, [Claude Code](https://claude.com/claude-code)
+- **Windows (native, primary):** Windows 11 24H2 with current updates or newer, [Claude Code](https://claude.com/claude-code)
   signed in with your Claude account, and Python 3 (`setup-windows.ps1` installs the MXC sandbox runtime,
   the tools and the Python packages). Optional: `winget install Gyan.FFmpeg` and `orbit doctor --get-whisper`
   for voice; Python's `soundcard` for live calls.

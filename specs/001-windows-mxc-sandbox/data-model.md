@@ -25,9 +25,9 @@ Per-**contained-command** mapping of the existing Orbit policy onto MXC request 
 
 | Field (Orbit concept) | Source (unchanged) | MXC surface |
 | --- | --- | --- |
-| deny_read | `SECRET_PATHS` + secrets folder + Windows-native additions | `filesystem.deny_read` |
-| allow_write | employee workspace, team tree, temp | `filesystem.allow_write` |
-| allowed_domains | `BASE_DOMAINS` + registry `network_domains` + gateway host needs | `network` egress deny-default + allow list |
+| deny_read | `SECRET_PATHS` + secrets folder + Windows-native additions | `filesystem.deniedPaths` |
+| allow_write | employee workspace, team tree, temp | `filesystem.readwritePaths`; host volume roots are read-only |
+| allowed_domains | `BASE_DOMAINS` + registry `network_domains` + gateway host needs | MXC proxy-only model: direct egress denied; per-command HTTP/S proxy enforces domains |
 | strict allowlist | autonomy flag (existing) | same semantics — no ask-callback widening for autonomous runs |
 | `excluded commands / gateways` | abilities.json/command config | hook passes these through unwrapped (Orbit-layer limits unchanged) |
 | refused-unavailable | `failIfUnavailable` semantics | hook denies the command when containment can't be established; Orbit omits the built-in sandbox `failIfUnavailable` key in run settings on native Windows |

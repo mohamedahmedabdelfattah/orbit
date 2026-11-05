@@ -1,5 +1,10 @@
 # Product
 
+**Current platform release (0.8.0):** Native Windows 11 is a first-class path. Crew shell commands
+run in Microsoft Execution Containers (MXC), with WSL2 retained as an explicit fallback. Orbit-side
+policy and fallback behavior are covered by automated tests; real-host MXC validation is optional and
+documented in `specs/001-windows-mxc-sandbox/quickstart.md`.
+
 ## Register
 
 product

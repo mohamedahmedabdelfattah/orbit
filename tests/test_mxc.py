@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -33,6 +34,11 @@ class StubResult:
 
 
 FAKE_EXECUTOR = os.path.join("C:" + os.sep, "fake", "wxc-exec.exe")
+PROBE_REPORT = json.dumps({"tier": "base-container", "needsDaclAugmentation": False, "probes": {
+    "baseContainerApiPresent": True,
+    "baseContainerSupportsDenyPaths": True,
+    "baseContainerSupportsIdentitylessLoopbackProxy": True,
+}})
 
 
 class Seam(unittest.TestCase):
@@ -60,6 +66,7 @@ class Request(unittest.TestCase):
     def setUp(self):
         self.ws = tempfile.mkdtemp(dir=TMP)
         self.emp = {"id": "sara", "workspace": self.ws, "name": "Sara"}
+        os.makedirs(os.path.join(engine.HOME, "team"), exist_ok=True)
         self.kind = set_kind("windows")
 
     def tearDown(self):
@@ -70,11 +77,16 @@ class Request(unittest.TestCase):
 
     def test_fail_closed_defaults_hold_by_construction(self):
         r = self.build()
+        self.assertEqual(r["version"], "1.0.0")
+        self.assertEqual(r["containment"], "processcontainer")
         self.assertEqual(r["network"]["egress"]["default"], "deny")
-        self.assertIn("pypi.org", r["network"]["egress"]["allow"])
-        self.assertTrue(r["filesystem"]["deny_read"])
-        self.assertIn(os.path.join(engine.HOME, "team"), r["filesystem"]["allow_write"])
-        self.assertGreater(r["timeout_ms"], 0)
+        self.assertNotIn("allow", r["network"]["egress"])  # domains go through the deny-direct proxy, never CIDR fields
+        self.assertTrue(r["filesystem"]["deniedPaths"])
+        self.assertIn(os.path.join(engine.HOME, "team"), r["filesystem"]["readwritePaths"])
+        self.assertGreater(r["process"]["timeout"], 0)
+        self.assertEqual(r["ui"], {"disable": False})       # native shells initialize Win32k even without windows
+        self.assertFalse(r["telemetry"]["enabled"])
+        self.assertFalse(r["fallback"]["allowDaclMutation"])
 
     def test_deny_and_allow_are_disjoint(self):
         pol = mxc.compute_policy(self.emp)
@@ -87,7 +99,7 @@ class Request(unittest.TestCase):
         reg["network_domains"] = ["example.com"]
         engine.save_registry(reg)
         try:
-            allow = self.build()["network"]["egress"]["allow"]
+            allow = mxc.compute_policy(self.emp)["domains"]
             self.assertIn("example.com", allow)             # an owner choice widens it
             self.assertIn("pypi.org", allow)                # the base set is always there
         finally:
@@ -101,14 +113,54 @@ class Request(unittest.TestCase):
 
     def test_deny_read_narrows_to_the_machine_s_native_secrets(self):
         r = self.build()
-        # the employee's own workspace is never in deny_read, and the native secret set is
-        deny = {os.path.normcase(p) for p in r["filesystem"]["deny_read"]}
+        # the employee's own workspace is never denied, and the source policy carries native secrets;
+        # the wire request omits only paths that do not exist (MXC rejects nonexistent policy paths).
+        deny = {os.path.normcase(p) for p in r["filesystem"]["deniedPaths"]}
         self.assertNotIn(os.path.normcase(self.ws), deny)
-        self.assertTrue(any(d.endswith(".ssh") for d in deny))              # the native secret root is there
+        policy_deny = {os.path.normcase(p) for p in mxc.compute_policy(self.emp)["deny_read"]}
+        self.assertTrue(any(d.endswith(".ssh") for d in policy_deny))       # the native secret root is sourced
+
+    def test_the_agent_command_is_the_stable_schema_process_command(self):
+        r = mxc.build_request(self.emp, "echo one && echo two", self.ws, "PowerShell")
+        self.assertIn("powershell.exe", r["process"]["commandLine"].lower())
+        self.assertIn("echo one && echo two", r["process"]["commandLine"])
+        self.assertNotIn("command", r)                         # old Orbit-only pseudo-schema is gone
+        self.assertNotIn("timeout_ms", r)
 
     def test_cache_roundtrip_is_the_same_policy(self):
         mxc.write_policy_cache(self.emp)
         self.assertEqual(mxc.read_policy_cache(self.emp), mxc.compute_policy(self.emp))
+
+
+class DomainProxy(unittest.TestCase):
+    """MXC accepts CIDRs, not durable DNS rules: Orbit's per-command proxy enforces owner domains."""
+
+    def test_exact_and_explicit_wildcard_domains_only(self):
+        self.assertTrue(mxc._host_allowed("pypi.org", ["pypi.org"]))
+        self.assertFalse(mxc._host_allowed("evilpypi.org", ["pypi.org"]))
+        self.assertFalse(mxc._host_allowed("files.pypi.org", ["pypi.org"]))
+        self.assertTrue(mxc._host_allowed("files.example.com", ["*.example.com"]))
+        self.assertFalse(mxc._host_allowed("example.com", ["*.example.com"]))
+
+    def test_approved_names_still_cannot_rebind_to_the_owners_machine(self):
+        original = mxc.socket.getaddrinfo
+        mxc.socket.getaddrinfo = lambda *_a, **_k: [(mxc.socket.AF_INET, mxc.socket.SOCK_STREAM, 6, "",
+                                                     ("127.0.0.1", 443))]
+        try:
+            self.assertEqual(mxc._public_endpoints("approved.example", 443), [])
+        finally:
+            mxc.socket.getaddrinfo = original
+
+    def test_proxy_mode_keeps_direct_egress_denied(self):
+        req = {"network": {"egress": {"default": "deny"},
+                           "ingress": {"default": "deny", "hostLoopback": "deny"}}}
+        wire = mxc._with_proxy(req, 43123)
+        self.assertEqual(wire["network"]["egress"], {"default": "deny"})
+        self.assertEqual(wire["network"]["ingress"], {"default": "allow", "hostLoopback": "allow"})
+        self.assertEqual(wire["processContainer"]["capabilities"], ["internetClient"])
+        self.assertEqual(wire["runtimeConfig"]["networkProxy"], "http://127.0.0.1:43123")
+        self.assertEqual(wire["process"]["env"], ["NO_PROXY=", "no_proxy="])
+        self.assertNotIn("runtimeConfig", req)               # per-command mutation never changes the audit record
 
 
 class Hook(unittest.TestCase):
@@ -125,7 +177,7 @@ class Hook(unittest.TestCase):
         self.pin = mxc.version_pinned
         mxc.version_pinned = lambda: ""
         self.env = {k: os.environ.pop(k) for k in ("STAFF_EMPLOYEE",) if k in os.environ}
-        mxc.set_executor_stub(lambda args, env=None, timeout=None: StubResult(0, "schema v1.0.0"))
+        mxc.set_executor_stub(lambda args, env=None, timeout=None: StubResult(0, PROBE_REPORT))
 
     def tearDown(self):
         mxc._gateway_patterns, mxc.executor_path, mxc.version_pinned = self.pat, self.exPath, self.pin
@@ -133,24 +185,37 @@ class Hook(unittest.TestCase):
         os.environ.update(self.env)
         osinfo.KIND = self.kind
 
-    def hook(self, cmd="echo hi"):
-        return mxc.decision({"tool_name": "Bash", "tool_input": {"command": cmd}, "cwd": self.ws})
+    def hook(self, cmd="Write-Output hi", tool="PowerShell"):
+        return mxc.decision({"tool_name": tool, "tool_input": {"command": cmd}, "cwd": self.ws})
 
     def test_an_excluded_command_passes_through_unwrapped(self):
-        self.assertEqual(self.hook("staff-fetch --url x"), {})
+        self.assertEqual(self.hook("staff-fetch --url x", "Bash"), {})
 
     def test_a_contained_command_is_allowed_with_the_rewritten_input(self):
-        r = self.hook("echo hi")
+        r = self.hook("Write-Output hi")
         self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "allow")
         contained = r["hookSpecificOutput"]["updatedInput"]["command"]
-        self.assertIn("wxc-exec", contained)
-        self.assertIn("echo hi", contained)                 # the agent's own command, inside the boundary
-        tokens = contained.split(" ")
-        req_f = tokens[1]                                   # executor, request path, then the command
+        self.assertIn("mxc.py", contained)
+        self.assertIn("--run", contained)                   # helper owns the short-lived domain proxy + executor
+        self.assertTrue(contained.startswith('& "'))        # PowerShell invokes a quoted Python path with call operator
+        quoted = re.findall(r'"([^"]+)"', contained)
+        req_f, domains_f = quoted[-2:]
         with open(req_f, encoding="utf-8") as fh:
             req = json.load(fh)
         self.assertEqual(req["network"]["egress"]["default"], "deny")
-        self.assertEqual(req["command"], "echo hi")         # agent-flow neutrality: nothing Orbit-added
+        self.assertIn("Write-Output hi", req["process"]["commandLine"])  # agent-flow neutrality: command is inside
+        with open(domains_f, encoding="utf-8") as fh:
+            sidecar = json.load(fh)
+        self.assertIn("pypi.org", sidecar["domains"])        # approved domains are enforced by the host proxy
+        self.assertIn(sidecar["temp_dir"], req["filesystem"]["readwritePaths"])  # one command, one temp grant
+        self.assertIn("TEMP=" + sidecar["temp_dir"], req["process"]["env"])
+        mxc._remove_command_temp(sidecar["temp_dir"])
+
+    def test_git_bash_is_denied_with_a_powershell_retry_not_run_on_the_host(self):
+        r = self.hook("echo hi", "Bash")
+        self.assertEqual(r["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("retry this command as PowerShell", r["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIsNone(r["hookSpecificOutput"].get("updatedInput"))
 
     def test_missing_executor_denies_rather_than_running_unsandboxed(self):
         mxc.executor_path = lambda: None
@@ -221,9 +286,9 @@ class Probe(unittest.TestCase):
         }
 
         def stub(args, env=None, timeout=None):
-            if args[-1] == "--debug":
-                return StubResult(0, "schema v1.0.0\n")
-            name = os.path.splitext(os.path.basename(args[-2]))[0]
+            if args[-1] == "--probe":
+                return StubResult(0, PROBE_REPORT)
+            name = os.path.splitext(os.path.basename(args[-1]))[0]
             return StubResult(*decisions[name])
         return stub
 
@@ -236,12 +301,12 @@ class Probe(unittest.TestCase):
 
     def test_a_secret_read_that_leaks_verdicts_unusable(self):
         def stub(args, env=None, timeout=None):
-            if args[-1] == "--debug":
-                return StubResult(0, "schema v1.0.0\n")
-            cmd = args[-1]
-            if "inside.txt" in cmd and "orbit-probe-secret" not in cmd:
+            if args[-1] == "--probe":
+                return StubResult(0, PROBE_REPORT)
+            name = os.path.splitext(os.path.basename(args[-1]))[0]
+            if name == "probe-pos":
                 return StubResult(0, "ok\n")
-            if "orbit-probe-secret" in cmd:
+            if name == "probe-neg-read":
                 return StubResult(0, "pretend credential\n")   # the leak: the read succeeded
             return StubResult(1, "denied")
         r = self._probe(stub)
@@ -281,8 +346,11 @@ class Audit(unittest.TestCase):
 
     def test_the_audit_probe_runs_through_the_seam_and_reports_in_owner_words(self):
         seen = []
-        mxc.set_executor_stub(lambda args, env=None, timeout=None:
-                              seen.append(args) or StubResult(1, "violation: reading a denied path"))
+        def stub(args, env=None, timeout=None):
+            seen.append(args)
+            return StubResult(0, PROBE_REPORT) if args[-1] == "--probe" else \
+                StubResult(1, "violation: reading a denied path")
+        mxc.set_executor_stub(stub)
         text = mxc.audit()
         self.assertTrue(any(s and s[1] == mxc.EXECUTOR_FLAG_AUDIT for s in seen), seen)   # the triage mode
         self.assertNotIn(mxc.EXECUTOR_FLAG_AUDIT,               # and never on a real contained command
@@ -375,7 +443,7 @@ class Support(unittest.TestCase):
 
     def test_the_bundle_is_evidence_files_not_private_work(self):
         ws = self.plant()
-        os.makedirs(os.path.join(ws, "requests"), exist_ok=True)
+        os.makedirs(mxc.request_dir("sara"), exist_ok=True)
         paths = mxc.support_bundle_paths()
         text = " | ".join(paths)
         self.assertIn("mxc.jsonl", text)

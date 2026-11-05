@@ -292,9 +292,9 @@ def windows_checks():
     out = []
     build = _win_build()
     parts = [p for p in (build.split(".") + ["0", "0"])[:3] if p.isdigit()]
-    ok = tuple(int(p) for p in parts) >= (10, 0, 22621)     # Windows 11 22H2: first build with containers
-    out.append((ok, "Windows 11 (22H2 or later)%s" % ("" if ok else
-                ": this is build %s, and Orbit's sandbox needs Windows 11 or newer. On this machine the crew "
+    ok = tuple(int(p) for p in parts) >= (10, 0, 26100)     # MXC ProcessContainer: updated Windows 11 24H2+
+    out.append((ok, "Windows 11 (updated 24H2 or later)%s" % ("" if ok else
+                ": this is build %s, and Orbit's sandbox needs updated Windows 11 24H2 or newer. On this machine the crew "
                 "runs in WSL2 mode instead (see docs/SETUP.md, 'Windows through WSL')" % (build or "unknown")), True))
     pyw = service_pythonw()
     out.append((bool(pyw and os.path.exists(pyw)), "Python 3 (pythonw.exe runs the service)%s" % (

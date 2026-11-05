@@ -39,8 +39,9 @@ If a step fails twice, stop and tell them plainly what failed and what you'd try
 5. Hand over (below).
 
 ## Windows
-Native Windows is the primary Windows path: no WSL, no Linux shell, no restarts. You run commands from
-here (Claude, PowerShell or Terminal) as themselves.
+On Windows 11 24H2 with current updates or newer, native Windows is the primary path: no WSL, no Linux
+shell, no restarts. You run commands from here (Claude, PowerShell or Terminal) as themselves. The
+installer/doctor sends older or unsupported builds to the WSL2 fallback below.
 1. Get the kit. If the folder (say `C:\Users\them\orbit`) is already a checkout: `git -C <kit> pull --ff-only`.
    Otherwise: `git clone https://github.com/BasemTarekkamal/orbit <kit>`.
 2. Claude Code for the employees, signed in with their own Claude account. `claude --version`, then
@@ -49,7 +50,8 @@ here (Claude, PowerShell or Terminal) as themselves.
    their browser; nothing typed comes back to this chat.
 3. `powershell -ExecutionPolicy Bypass -File <kit>\setup-windows.ps1` (add `-Yes` to skip the optional
    voice-notes prompts). It checks the Windows build, installs Python, git, ffmpeg and tesseract with
-   winget, installs the MXC sandbox runtime into the kit's `vendor\mxc` (checksum-verified), and the
+   winget, installs the signed MXC sandbox runtime into the kit's `vendor\mxc` (checksum and Microsoft
+   signature verified), and the
    Python packages, your user only. Two to five minutes. It's safe to run again.
 4. Starting the crew: `python <kit>\orbit setup` (it asks their business and bot token in the panel;
    the checks gate it). If a check fails, `python <kit>\orbit doctor` and fix what it lists, one item

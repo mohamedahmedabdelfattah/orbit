@@ -20,13 +20,20 @@ import copy
 import fnmatch
 import glob
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import select
+import shutil
+import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
 
 import engine
 import osinfo
@@ -35,14 +42,17 @@ CORE = os.path.dirname(os.path.abspath(__file__))
 KIT = os.path.dirname(CORE)
 
 # ------------------------------------------------------------------ constants
-SCHEMA_MAJOR = 1                                    # the MXC request schema major version Orbit emits
+SCHEMA_VERSION = "1.0.0"                            # exact immutable stable contract shipped by MXC 1.0.1
+SCHEMA_MAJOR = 1                                    # compatibility/reporting shorthand for doctor
 EXECUTOR = "wxc-exec.exe"
 EXECUTOR_FLAG_DEBUG = "--debug"
 EXECUTOR_FLAG_AUDIT = "--audit"                     # doctor triage only — never on real commands
+EXECUTOR_FLAG_PROBE = "--probe"
 COMMAND_TIMEOUT_MS = 600000                         # a contained command dies after 10 min, no orphans
 
 VENDOR_DIR = os.path.join(KIT, "vendor", "mxc")
 VERSION_FILE = os.path.join(VENDOR_DIR, "version.txt")
+SCHEMA_FILE = os.path.join(VENDOR_DIR, "schema-version.txt")
 
 MODES = ("mxc", "wsl2")
 
@@ -75,35 +85,61 @@ def version_pinned() -> str:
 
 
 def version_of(executor: str = None) -> str:
-    """The runtime's own version, from the schema line of its --debug output. Never required."""
+    """The installer-pinned runtime version. wxc-exec deliberately has no version-print flag."""
+    return version_pinned()
+
+
+def schema_pinned() -> str:
+    """The schema recorded beside the installed executor, or Orbit's exact stable contract."""
     try:
-        r = _spawn_executor([executor or executor_path() or EXECUTOR, EXECUTOR_FLAG_DEBUG], timeout=30)
-        m = re.search(r"schema[: ]+v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", (r.stdout or "") + (r.stderr or ""))
-        return ".".join(g for g in m.groups() if g is not None) if m else ""
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
+        with open(SCHEMA_FILE, encoding="utf-8") as fh:
+            return fh.read().strip() or SCHEMA_VERSION
+    except OSError:
+        return SCHEMA_VERSION
 
 
 def discover() -> dict:
-    """Is MXC usable on this machine? Files and schema only — only the probe can prove enforcement
-    (research D6: discovery is never proof). → {ok, reason, executor, version, schema_major}"""
+    """Is the ProcessContainer runtime present and capable of Orbit's deny paths and loopback proxy?
+    This is still discovery, not proof: probe() runs positive and negative workloads (research D6)."""
     ex = executor_path()
     if not ex:
         return {"ok": False, "reason": "the MXC executor (%s) is missing: run the Windows installer "
                 "(setup-windows.ps1) again" % EXECUTOR, "executor": None, "version": "",
-                "schema_major": SCHEMA_MAJOR}
-    ver, pinned = version_of(ex), version_pinned()
-    if pinned and ver and pinned.split(".")[0] != ver.split(".")[0]:
-        return {"ok": False, "reason": "the installed MXC runtime is v%s but Orbit asks for schema "
-                "v%d: run the Windows installer again" % (ver, SCHEMA_MAJOR), "executor": ex,
-                "version": ver, "schema_major": SCHEMA_MAJOR}
-    return {"ok": True, "reason": "", "executor": ex, "version": ver, "schema_major": SCHEMA_MAJOR}
+                "schema_major": SCHEMA_MAJOR, "schema_version": SCHEMA_VERSION}
+    pinned_schema = schema_pinned()
+    if pinned_schema.split(".")[0] != SCHEMA_VERSION.split(".")[0]:
+        return {"ok": False, "reason": "the installed MXC schema is v%s but Orbit emits v%s: run "
+                "setup-windows.ps1 again" % (pinned_schema, SCHEMA_VERSION), "executor": ex,
+                "version": version_pinned(), "schema_major": SCHEMA_MAJOR,
+                "schema_version": SCHEMA_VERSION}
+    rc, text, _ = ran([ex, EXECUTOR_FLAG_PROBE], timeout=30)
+    try:
+        report = json.loads(text) if rc == 0 else {}
+    except ValueError:
+        report = {}
+    probes = report.get("probes") or {}
+    missing = []
+    for field, words in (("baseContainerApiPresent", "ProcessContainer support"),
+                         ("baseContainerSupportsDenyPaths", "secret-path denial"),
+                         ("baseContainerSupportsIdentitylessLoopbackProxy", "approved-site proxying")):
+        if not probes.get(field):
+            missing.append(words)
+    if rc != 0 or not report or missing:
+        detail = ", ".join(missing) or denial_summary(text) or "the host capability probe failed"
+        return {"ok": False, "reason": "this Windows build cannot provide %s; install current Windows "
+                "updates or use WSL2 mode" % detail, "executor": ex, "version": version_pinned(),
+                "schema_major": SCHEMA_MAJOR, "schema_version": SCHEMA_VERSION}
+    return {"ok": True, "reason": "", "executor": ex, "version": version_pinned(),
+            "schema_major": SCHEMA_MAJOR, "schema_version": SCHEMA_VERSION, "capabilities": report}
 
 
-def executor_argv(executor: str, request_file: str, command: str, debug=False) -> list:
-    """The executor invocation: executor, request file, wrapped command (D1: the CLI shape — request
-    path plus wrapped command argument — is verified against the current release at packaging time)."""
-    return [executor] + ([EXECUTOR_FLAG_DEBUG] if debug else []) + [request_file, command]
+def executor_argv(executor: str, request_file: str, command: str = None, debug=False) -> list:
+    """The official one-shot CLI: wxc-exec [--debug] request.json.
+
+    The command already lives in process.commandLine. Keeping it there makes the request independently
+    valid and avoids the CLI's optional trailing `-- <COMMAND>...` override surface.
+    """
+    return [executor] + ([EXECUTOR_FLAG_DEBUG] if debug else []) + [request_file]
 
 
 SPAWN = None                                            # tests intercept here: set_executor_stub(fn)
@@ -203,14 +239,10 @@ def compute_policy(emp: dict) -> dict:
     never appear here: they run unwrapped, where their own hosts/limits live (excludedCommands parity)."""
     others = [os.path.realpath(p) for p in glob.glob(os.path.join(engine.HOME, "employees", "*"))
               if os.path.realpath(p) != os.path.realpath(emp["workspace"])]
-    if osinfo.KIND == "windows":
-        temp_dir = tempfile.gettempdir()
-        team = os.path.join(engine.HOME, "team")
-    else:
-        temp_dir, team = tempfile.gettempdir(), os.path.join(engine.HOME, "team")
+    team = os.path.join(engine.HOME, "team")
     return {
         "deny_read": sorted(set(_secret_paths() + others)),
-        "allow_write": [emp["workspace"], team, temp_dir],
+        "allow_write": [emp["workspace"], team],
         "domains": sorted(set(engine.BASE_DOMAINS
                               + engine.registry().get("network_domains", [])
                               + emp.get("network_domains", []))),
@@ -248,17 +280,291 @@ def _policy(emp):
     return read_policy_cache(emp) or compute_policy(emp)
 
 
-def build_request(emp, command: str, cwd: str = None) -> dict:
-    """One MXC request for one contained command, per contracts/mxc-request.md. Invariants 1–3
-    (fail-closed defaults, no silent loosening, agent-flow neutrality) hold by construction."""
+def _workload_command(command: str, tool_name: str = None) -> str:
+    """Preserve the shell semantics of the tool whose command the hook received."""
+    if tool_name == "PowerShell":
+        return subprocess.list2cmdline(["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+                                       "-Command", command])
+    if tool_name == "Bash":
+        raise ValueError("Git Bash cannot initialize inside MXC 1.0; use Claude's PowerShell tool")
+    return command
+
+
+def _readonly_roots(paths) -> list:
+    """Read parity with Orbit's old sandbox: host volumes are read-only except explicit write roots."""
+    roots = set()
+    for path in paths:
+        if not path:
+            continue
+        drive, _tail = os.path.splitdrive(os.path.abspath(os.path.expanduser(path)))
+        if drive:
+            roots.add(drive + os.sep)
+    return sorted(roots)
+
+
+def build_request(emp, command: str, cwd: str = None, tool_name: str = None, temp_dir: str = None) -> dict:
+    """One exact MXC stable-schema 1.0.0 request for one contained command.
+
+    Domain names are deliberately not put in network.egress.allow: MXC 1.0 accepts CIDRs there, not
+    DNS names. run_request() adds a deny-direct, loopback-only HTTP/S proxy for the policy's domains.
+    """
     pol = emp if isinstance(emp, dict) and "deny_read" in emp else _policy(emp)
+    workdir = os.path.abspath(cwd or os.getcwd())
+    # ProcessContainer treats a nonexistent policy path as a configuration error. Omitting one is safe:
+    # a command cannot create it because its parent is not writable, and the policy is rebuilt per command.
+    denied = [p for p in pol["deny_read"] if os.path.lexists(p)]
+    writable = [p for p in pol["allow_write"] if os.path.lexists(p)]
+    if temp_dir and os.path.isdir(temp_dir):
+        writable.append(temp_dir)
+    process = {"commandLine": _workload_command(command, tool_name), "cwd": workdir,
+               "inheritDefaultEnv": True, "timeout": pol.get("timeout_ms", COMMAND_TIMEOUT_MS)}
+    if temp_dir:
+        process["env"] = ["TEMP=%s" % temp_dir, "TMP=%s" % temp_dir]
     return {
-        "command": command,
-        "working_directory": os.path.abspath(cwd or os.getcwd()),
-        "filesystem": {"deny_read": pol["deny_read"], "allow_write": pol["allow_write"]},
-        "network": {"egress": {"default": "deny", "allow": pol["domains"]}},
-        "timeout_ms": pol.get("timeout_ms", COMMAND_TIMEOUT_MS),
+        "version": SCHEMA_VERSION,
+        "containment": "processcontainer",
+        "lifecycle": {"destroyOnExit": True, "preservePolicy": False},
+        "process": process,
+        "filesystem": {"readwritePaths": writable,
+                       "readonlyPaths": _readonly_roots([workdir, sys.executable, KIT] + writable + denied),
+                       "deniedPaths": denied},
+        "network": {"egress": {"default": "deny"},
+                    "ingress": {"default": "deny", "hostLoopback": "deny"}},
+        "ui": {"disable": False},                         # PowerShell/native CLI startup needs Win32k
+        "telemetry": {"enabled": False},
+        "fallback": {"allowDaclMutation": False},
     }
+
+
+# ------------------------------------------------------------------ deny-direct domain proxy
+def _host_allowed(host: str, domains) -> bool:
+    """Exact domains and explicit `*.example.com` patterns only; never suffix-smuggle a hostname."""
+    try:
+        host = (host or "").strip().rstrip(".").encode("idna").decode("ascii").lower()
+    except (UnicodeError, AttributeError):
+        return False
+    if not host:
+        return False
+    for raw in domains or []:
+        try:
+            pattern = str(raw).strip().rstrip(".").encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            continue
+        if pattern.startswith("*."):
+            base = pattern[2:]
+            if base and host != base and host.endswith("." + base):
+                return True
+        elif host == pattern:
+            return True
+    return False
+
+
+def _authority(value: str, default_port: int):
+    """An HTTP authority → (host, port), including bracketed IPv6."""
+    try:
+        parsed = urllib.parse.urlsplit("//" + value)
+        return parsed.hostname or "", parsed.port or default_port
+    except ValueError:
+        return "", 0
+
+
+def _public_endpoints(host: str, port: int):
+    """Resolve on the host; approved names never become local-network tunnels through the proxy."""
+    try:
+        found = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return []
+    public = []
+    for family, socktype, proto, _canon, address in found:
+        try:
+            if ipaddress.ip_address(address[0].split("%", 1)[0]).is_global:
+                public.append((family, socktype, proto, address))
+        except ValueError:
+            continue
+    return sorted(public, key=lambda item: item[0] != socket.AF_INET)  # IPv4 first on ordinary Windows hosts
+
+
+def _relay(left, right):
+    """Copy a proxy tunnel in both directions until either side closes."""
+    peers = [left, right]
+    try:
+        while peers:
+            ready, _w, _x = select.select(peers, [], peers, 30)
+            if not ready:
+                break
+            for source in ready:
+                data = source.recv(65536)
+                if not data:
+                    return
+                (right if source is left else left).sendall(data)
+    except (OSError, ValueError):
+        return
+
+
+class _DomainProxyHandler(socketserver.StreamRequestHandler):
+    """Small per-command HTTP/S CONNECT proxy. Direct container egress remains denied by MXC."""
+    timeout = 30
+    rbufsize = 0                                           # do not strand request-body/TLS bytes in a reader buffer
+
+    def _reply(self, code, words):
+        body = (words + "\n").encode("utf-8")
+        self.wfile.write(("HTTP/1.1 %d %s\r\nConnection: close\r\nContent-Length: %d\r\n\r\n"
+                          % (code, words, len(body))).encode("ascii") + body)
+
+    def handle(self):
+        first = self.rfile.readline(65537)
+        if not first or len(first) > 65536:
+            return
+        try:
+            method, target, version = first.decode("iso-8859-1").strip().split(" ", 2)
+        except ValueError:
+            self._reply(400, "Bad Request")
+            return
+        headers, total = [], 0
+        while True:
+            line = self.rfile.readline(65537)
+            total += len(line)
+            if not line or line in (b"\r\n", b"\n"):
+                break
+            if total > 65536:
+                self._reply(431, "Headers Too Large")
+                return
+            headers.append(line)
+        method = method.upper()
+        if method == "CONNECT":
+            host, port = _authority(target, 443)
+            origin = None
+        else:
+            parsed = urllib.parse.urlsplit(target)
+            if parsed.scheme not in ("", "http"):
+                self._reply(400, "Bad Request")
+                return
+            host, port = parsed.hostname or "", parsed.port or 80
+            if not host:
+                host_header = next((h.split(b":", 1)[1].strip().decode("iso-8859-1") for h in headers
+                                    if h.lower().startswith(b"host:")), "")
+                host, port = _authority(host_header, 80)
+                origin = target or "/"
+            else:
+                origin = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        if port not in (80, 443) or not _host_allowed(host, self.server.domains):
+            self._reply(403, "Forbidden")
+            return
+        endpoints = _public_endpoints(host, port)
+        if not endpoints:
+            self._reply(502, "Bad Gateway")
+            return
+        upstream = None
+        for family, socktype, proto, address in endpoints:
+            candidate = socket.socket(family, socktype, proto)
+            candidate.settimeout(15)
+            try:
+                candidate.connect(address)
+                upstream = candidate
+                break
+            except OSError:
+                candidate.close()
+        if upstream is None:
+            self._reply(502, "Bad Gateway")
+            return
+        with upstream:
+            if method == "CONNECT":
+                self.wfile.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                self.wfile.flush()
+            else:
+                clean = [h for h in headers if not h.lower().startswith((b"proxy-connection:",
+                                                                          b"proxy-authorization:"))]
+                upstream.sendall(("%s %s %s\r\n" % (method, origin, version)).encode("iso-8859-1")
+                                 + b"".join(clean) + b"\r\n")
+            _relay(self.connection, upstream)
+
+
+class _DomainProxy(socketserver.ThreadingTCPServer):
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def __init__(self, domains):
+        self.domains = tuple(sorted(set(domains or [])))
+        super().__init__(("127.0.0.1", 0), _DomainProxyHandler)
+
+
+def _with_proxy(request: dict, port: int) -> dict:
+    """Select MXC's recommended proxy-only model: no direct internet/private destination is allowed."""
+    wire = copy.deepcopy(request)
+    wire["processContainer"] = {"capabilities": ["internetClient"]}
+    wire["network"] = {"egress": {"default": "deny"},
+                       "ingress": {"default": "allow", "hostLoopback": "allow"}}
+    wire["runtimeConfig"] = {"networkProxy": "http://127.0.0.1:%d" % port}
+    wire.setdefault("process", {}).setdefault("env", []).extend(["NO_PROXY=", "no_proxy="])
+    return wire
+
+
+def _stream_executor(args, timeout=None):
+    """Run the real workload with inherited stdio; tests still use the one executor seam."""
+    if SPAWN is not None:
+        return SPAWN(args=args, env=None, timeout=timeout)
+    return subprocess.run(args, timeout=timeout)
+
+
+def _remove_command_temp(path: str) -> None:
+    """Delete only an Orbit-created per-command temp directory, never a sidecar-supplied arbitrary path."""
+    if not path:
+        return
+    candidate = os.path.realpath(path)
+    parent = os.path.dirname(candidate)
+    runtime = os.path.realpath(os.path.join(engine.HOME, ".runtime"))
+    try:
+        inside = os.path.normcase(os.path.commonpath([runtime, candidate])) == os.path.normcase(runtime)
+    except ValueError:
+        inside = False
+    if inside and os.path.basename(parent) == "tmp" and os.path.basename(os.path.dirname(parent)) == "mxc":
+        shutil.rmtree(candidate, ignore_errors=True)
+
+
+def run_request(request_file: str, domains_file: str) -> int:
+    """Start the per-command allowlist proxy, then run one official MXC request with streaming stdio."""
+    command_temp = None
+    try:
+        with open(request_file, encoding="utf-8") as fh:
+            request = json.load(fh)
+        with open(domains_file, encoding="utf-8") as fh:
+            sidecar = json.load(fh)
+        if isinstance(sidecar, list):                       # compatibility with early 0.8.0 request files
+            domains = sidecar
+        elif isinstance(sidecar, dict):
+            domains, command_temp = sidecar.get("domains"), sidecar.get("temp_dir")
+        else:
+            domains = None
+        if not isinstance(domains, list) or not all(isinstance(d, str) for d in domains):
+            raise ValueError("invalid approved-domain policy")
+        ex = executor_path()
+        if not ex:
+            raise OSError("wxc-exec.exe is missing; run setup-windows.ps1")
+        proxy = _DomainProxy(domains)
+        thread = threading.Thread(target=proxy.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        thread.start()
+        wire_file = None
+        try:
+            wire = _with_proxy(request, proxy.server_address[1])
+            fd, wire_file = tempfile.mkstemp(prefix="mxc-wire-", suffix=".json", dir=os.path.dirname(request_file))
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(wire, fh)
+            result = _stream_executor(executor_argv(ex, wire_file), timeout=None)
+            return int(getattr(result, "returncode", 1))
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(timeout=2)
+            if wire_file:
+                try:
+                    os.remove(wire_file)
+                except OSError:
+                    pass
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
+        sys.stderr.write("Orbit's sandbox could not start: %s\n" % _reason(e))
+        return 126
+    finally:
+        _remove_command_temp(command_temp)
 
 
 # ------------------------------------------------------------------ the hook (PreToolUse)
@@ -280,9 +586,9 @@ def _excluded(command: str, patterns=None) -> bool:
 def hook_settings() -> dict:
     """The hooks block Orbit adds to the settings blob on native Windows: a PreToolUse hook matching
     Bash|PowerShell that rewrites each shell command into an MXC executor invocation (T033)."""
-    cmd = '"%s" "%s" --hook' % (sys.executable, os.path.join(CORE, "mxc.py"))
     return {"PreToolUse": [{"matcher": "Bash|PowerShell",
-                            "hooks": [{"type": "command", "command": cmd, "timeout": 30}]}]}
+                            "hooks": [{"type": "command", "command": sys.executable,
+                                       "args": [os.path.join(CORE, "mxc.py"), "--hook"], "timeout": 30}]}]}
 
 
 def _log_decision(ws: str, rec: dict) -> None:
@@ -293,6 +599,12 @@ def _log_decision(ws: str, rec: dict) -> None:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except OSError:
         pass
+
+
+def request_dir(emp_id: str) -> str:
+    """Policy files live outside employee workspaces, so file tools cannot alter them after the hook."""
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", emp_id or "unknown")[:80] or "unknown"
+    return os.path.join(engine.HOME, ".runtime", safe, "mxc", "requests")
 
 
 def denials(limit=10) -> list:
@@ -322,9 +634,8 @@ def support_bundle_paths() -> list:
     out = []
     for f in sorted(glob.glob(os.path.join(engine.HOME, "employees", "*", "state", "mxc.jsonl"))):
         out.append(f)
-        req = os.path.join(os.path.dirname(f), "requests")
-        if os.path.isdir(req):
-            out.append(req)
+    out.extend(sorted(p for p in glob.glob(os.path.join(engine.HOME, ".runtime", "*", "mxc", "requests"))
+                      if os.path.isdir(p)))
     out.extend(sorted(glob.glob(os.path.join(engine.HOME, "employees", "*", "state", "runs.jsonl"))))
     return out
 
@@ -348,27 +659,53 @@ def decision(payload: dict, cwd=None, now=None) -> dict:
     if _excluded(cmd):
         _log_decision(ws, {**base, "decision": "pass-through"})
         return {}                                        # no decision: Claude's own rules apply, unwrapped
+    if payload.get("tool_name") == "Bash":
+        why = ("native Windows uses Claude's PowerShell tool because Git Bash cannot initialize inside "
+               "MXC 1.0; retry this command as PowerShell")
+        _log_decision(ws, {**base, "decision": "deny", "reason": why})
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                        "permissionDecisionReason": why}}
     d = discover()
+    req_dir = request_dir(emp_id)
+    command_temp = None
     if d["ok"]:
         try:
-            req = build_request(emp, cmd, cwd or payload.get("cwd") or ws)
+            os.makedirs(req_dir, exist_ok=True)
+            temp_root = os.path.join(os.path.dirname(req_dir), "tmp")
+            os.makedirs(temp_root, exist_ok=True)
+            command_temp = tempfile.mkdtemp(prefix="command-", dir=temp_root)
+            policy = _policy(emp)
+            req = build_request(policy, cmd, cwd or payload.get("cwd") or ws, payload.get("tool_name"), command_temp)
+            domains = policy.get("domains") or []
         except Exception as e:  # noqa: BLE001
+            _remove_command_temp(command_temp)
             d = {**d, "ok": False, "reason": "couldn't build the containment request: %s" % _reason(e)}
     if not d["ok"]:
         msg = "Orbit's sandbox couldn't start (%s); the command was denied rather than run unsandboxed." % d["reason"]
         _log_decision(ws, {**base, "decision": "deny", "reason": d["reason"]})
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                        "permissionDecisionReason": _reason(msg)}}
-    req_dir = os.path.join(ws, "state", "requests")
-    os.makedirs(req_dir, exist_ok=True)
-    h = hashlib.sha256(json.dumps(req, sort_keys=True).encode("utf-8")).hexdigest()[:12]
-    path = os.path.join(req_dir, "%s-%s.json" % (time.strftime("%Y%m%d-%H%M%S"), h))
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(req, fh)
-    contained = " ".join(('"%s"' % a) if re.search(r"\s", a) else a
-                         for a in executor_argv(d["executor"], path, cmd))
+    try:
+        os.makedirs(req_dir, exist_ok=True)
+        policy_record = {"request": req, "allowed_domains": domains}
+        h = hashlib.sha256(json.dumps(policy_record, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+        stamp = "%s-%09d-%d" % (time.strftime("%Y%m%d-%H%M%S"), time.time_ns() % 1000000000, os.getpid())
+        stem = os.path.join(req_dir, "%s-%s" % (stamp, h))
+        path, domains_path = stem + ".json", stem + ".domains.json"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(req, fh)
+        with open(domains_path, "w", encoding="utf-8") as fh:
+            json.dump({"domains": domains, "temp_dir": command_temp}, fh)
+    except OSError as e:
+        _remove_command_temp(command_temp)
+        why = "couldn't write the containment request: %s" % _reason(e)
+        _log_decision(ws, {**base, "decision": "deny", "reason": why})
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                        "permissionDecisionReason": _reason(why)}}
+    contained = '& "%s" "%s" --run "%s" "%s"' % (sys.executable, os.path.join(CORE, "mxc.py"),
+                                                       path, domains_path)
     _log_decision(ws, {**base, "decision": "allow", "request_hash": h, "request": os.path.basename(path),
-                       "executor": os.path.basename(d["executor"])})
+                        "executor": os.path.basename(d["executor"])})
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                    "permissionDecisionReason": "contained by Orbit's sandbox (MXC)",
                                    "updatedInput": {**(payload.get("tool_input") or {}), "command": contained}}}
@@ -419,16 +756,17 @@ def probe(emp=None, builder=None, on_cmd=None) -> dict:
     if not d["ok"]:
         return {**out, "verdict": "unusable-with-reason", "capability_notes": {"discovery": d["reason"]}}
     ex = d["executor"]
-    builder = builder or (lambda cmd, cwd: build_request(emp, cmd, cwd))
+    tmp = tempfile.mkdtemp(prefix="mxc-probe-")
+    builder = builder or (lambda cmd, cwd: build_request(emp, cmd, cwd, temp_dir=tmp))
     base, forged = _probe_reqs(builder)
-    secret_file = os.path.join(tempfile.gettempdir(), "orbit-probe-secret.txt")
+    unique = "%s-%s" % (os.getpid(), time.time_ns())
+    secret_file = os.path.join(tempfile.gettempdir(), "orbit-probe-secret-%s.txt" % unique)
+    outside = os.path.join(os.path.expanduser("~"), "orbit-probe-should-fail-%s.tmp" % unique)
     try:
         with open(secret_file, "w", encoding="utf-8") as fh:
             fh.write("pretend credential\n")
     except OSError:
         pass
-    tmp = tempfile.mkdtemp(prefix="mxc-probe-")
-
     def case(name, req, cmd, timeout=45):
         req_f = os.path.join(tmp, name + ".json")
         try:
@@ -443,38 +781,44 @@ def probe(emp=None, builder=None, on_cmd=None) -> dict:
         return rc, txt, ms
 
     try:
-        is_win = osinfo.KIND == "windows"
         # positive: write inside scope and read it back
-        pos = 'python -c "import pathlib; print(pathlib.Path(r\'%s\').write_text(\'ok\'))"' % \
-            os.path.join(tmp, "inside.txt") if is_win else "echo ok > inside.txt && cat inside.txt"
+        inside = os.path.join(tmp, "inside.txt")
+        pos = subprocess.list2cmdline([sys.executable, "-c",
+                                      "import pathlib; print(pathlib.Path(%r).write_text('ok'))" % inside])
         rc, txt, ms = case("probe-pos", base(pos, tmp), pos)
         out["positive"]["write_inside_scope"] = rc == 0
         out["capability_notes"]["startup_ms"] = ms                   # SC6: ~1 s per command budget
-        # negative: a write outside allow_write (the team folder's git area is deliberately not writable)
-        neg = "echo outside > %s" % os.path.join(tmp, "..", "mxc-probe-should-fail.txt")
+        # negative: a normally owner-writable file outside workspace/team/temp must still be refused
+        neg = subprocess.list2cmdline([sys.executable, "-c",
+                                      "import pathlib; pathlib.Path(%r).write_text('outside')" % outside])
         rc, txt, _ = case("probe-neg-write", base(neg, tmp), neg, timeout=30)
         out["negative"]["outside_write"] = rc != 0 or bool(PROBE_DENY_MARKERS.search(txt))
         # negative: read a file this request's own deny_read covers
-        req = forged("type secret" if is_win else "cat secret", tmp,
-                     filesystem={"deny_read": [secret_file],
-                                 "allow_write": [tmp, tempfile.gettempdir()]})
-        cmd = "type \"%s\"" % secret_file if is_win else "cat %s" % secret_file
+        cmd = subprocess.list2cmdline([sys.executable, "-c", "print(open(%r).read())" % secret_file])
+        req = forged(cmd, tmp, filesystem={"deniedPaths": [secret_file],
+                                           "readonlyPaths": _readonly_roots([sys.executable, secret_file]),
+                                           "readwritePaths": [tmp]})
         rc, txt, _ = case("probe-neg-read", req, cmd, timeout=30)
         out["negative"]["secret_read"] = rc != 0 or bool(PROBE_DENY_MARKERS.search(txt))
         # negative: a connect to a host that is not allowlisted (literal address; no DNS needed)
-        req = forged("curl -m 4 -s 198.51.100.1 -o nul", tmp, network={"egress": {"default": "deny", "allow": []}})
-        rc, txt, _ = case("probe-neg-net", req, "curl -m 4 -s 198.51.100.1 -o nul" if is_win
-                          else "curl -m 4 -s 198.51.100.1 -o probe-net.txt", timeout=30)
+        net = subprocess.list2cmdline([sys.executable, "-c",
+                                      "import socket; socket.create_connection(('198.51.100.1',443),3).close()"])
+        req = forged(net, tmp, network={"egress": {"default": "deny"},
+                                       "ingress": {"default": "deny", "hostLoopback": "deny"}})
+        rc, txt, _ = case("probe-neg-net", req, net, timeout=30)
         out["negative"]["non_allowlisted_connect"] = rc != 0 or bool(PROBE_DENY_MARKERS.search(txt))
         # negative: a workload outliving its timeout is terminated (never orphaned)
-        slow = "ping -n 30 127.0.0.1" if is_win else "sleep 30"
-        req = forged(slow, tmp, timeout_ms=1500)
+        slow = subprocess.list2cmdline([sys.executable, "-c", "import time; time.sleep(30)"])
+        req = forged(slow, tmp)
+        req["process"]["timeout"] = 1500
         rc, txt, ms = case("probe-neg-timeout", req, slow, timeout=45)
-        out["negative"]["timeout_termination"] = rc != 0 or ms < 15000
-        if os.path.exists(secret_file):
-            os.remove(secret_file)                                   # nothing sensitive sits around
+        out["negative"]["timeout_termination"] = rc != 0 and ms < 15000
     finally:
-        import shutil
+        for planted in (secret_file, outside):
+            try:
+                os.remove(planted)                                   # no probe artifact survives success or failure
+            except OSError:
+                pass
         shutil.rmtree(tmp, ignore_errors=True)
     bad = [k for k, ok in out["negative"].items() if not ok]
     if all(out["positive"].values()) and not bad:
@@ -516,10 +860,9 @@ def audit(emp=None) -> str:
         req_f = os.path.join(tmp, "audit.json")
         with open(req_f, "w", encoding="utf-8") as fh:
             json.dump(build_request(emp or {"id": "audit", "workspace": tmp, "name": "audit"},
-                                    "echo audit-ok", tmp), fh)
-        rc, out, _ = ran([d["executor"], EXECUTOR_FLAG_AUDIT, req_f, "echo audit-ok"], timeout=60)
+                                    "Write-Output audit-ok", tmp, "PowerShell", tmp), fh)
+        rc, out, _ = ran([d["executor"], EXECUTOR_FLAG_AUDIT, req_f], timeout=60)
     finally:
-        import shutil
         shutil.rmtree(tmp, ignore_errors=True)
     body = denial_summary(out) if out.strip() else \
         "no audit details printed (exit %s). The runtime runs; ask support with the evidence files." % rc
@@ -531,4 +874,6 @@ def audit(emp=None) -> str:
 if __name__ == "__main__":
     if "--hook" in sys.argv:
         sys.exit(hook_main())
+    if len(sys.argv) == 4 and sys.argv[1] == "--run":
+        sys.exit(run_request(sys.argv[2], sys.argv[3]))
     print(__doc__)

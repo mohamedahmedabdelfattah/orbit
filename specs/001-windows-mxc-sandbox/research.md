@@ -16,21 +16,21 @@ Feature: `001-windows-mxc-sandbox`. Each entry: Decision, Rationale, Alternative
 - *Rust SDK*: no Rust toolchain in Orbit's kit. Rejected.
 - *Windows-native sandbox-runtime (`srt-win`)*: the Anthropic sandbox-runtime package has a Windows-native sandbox, but it is alpha, tied to Claude Code's own sandbox model, and mutually exclusive with the owner's explicit MXC requirement. Rejected.
 
-**Implementation-time verification required**: the exact distribution artifact for the MXC runtime/executor on Windows (GitHub release asset vs. contents of the npm/`.NET` packages) and its checksum verification; also the executor CLI shape — request-file path plus wrapped command argument — verified against the current release before the installer task (T020) lands.
+**Implementation-time verification completed (2026-11-05)**: official `@microsoft/mxc-sdk` 1.0.1 contains signed x64/ARM64 `wxc-exec.exe` binaries. Orbit pins the package URL and SHA-256, verifies Authenticode, and extracts only the host architecture's executor; it does not install Node or load the Node SDK. Runtime 1.0.1 keeps stable schema 1.0.0. The verified CLI is `wxc-exec.exe request.json`; the complete command is in `process.commandLine` (or follows an explicit `--`, which Orbit does not use).
 
 ## D2 — Policy translation (Orbit → MXC, per shell command)
 
-**Decision**: a single Orbit-side translation of the existing policy model, produced **per contained command**. Field names in the right column follow `contracts/mxc-request.md` (Orbit's canonical mapping); the actual MXC stable-schema field names are verified at implementation time (T020's artifact verification).
+**Decision**: a single Orbit-side translation of the existing policy model, produced **per contained command**. Field names in the right column are the verified exact MXC stable-schema 1.0.0 names; `contracts/mxc-request.md` fixes Orbit's canonical mapping.
 
 | Orbit policy surface (from `engine.settings_json()`) | MXC request field (stable schema) |
 | --- | --- |
-| `filesystem.denyRead` = `SECRET_PATHS` | `filesystem.deny_read` with **Windows-native paths** (`%USERPROFILE%\.ssh`, `%USERPROFILE%\.aws`, `%APPDATA%\gnupg`, `%APPDATA%\rclone`, `.netrc`, Chrome/Edge cookie & password stores, Desktop/Documents/Downloads, Orbit's secrets folder) |
-| `filesystem.allowWrite` = team tree | `filesystem.allow_write` = employee workspace + team tree + per-command temp |
-| `network.allowedDomains` = pypi/pythonhosted + owner domains (+ gateway needs, `strictAllowlist` per autonomy) | `network.egress default: deny` + allowed destinations; backend host filtering where supported |
+| `filesystem.denyRead` = `SECRET_PATHS` | `filesystem.deniedPaths` with **Windows-native paths** (`%USERPROFILE%\.ssh`, `%USERPROFILE%\.aws`, `%APPDATA%\gnupg`, `%APPDATA%\rclone`, `.netrc`, Chrome/Edge cookie & password stores, Desktop/Documents/Downloads, Orbit's secrets folder) |
+| `filesystem.allowWrite` = team tree | `filesystem.readwritePaths` = employee workspace + team tree + per-command temp; host volume roots are `readonlyPaths` |
+| `network.allowedDomains` = pypi/pythonhosted + owner domains (+ gateway needs, `strictAllowlist` per autonomy) | MXC proxy-only networking: direct egress deny-default; a per-command host proxy enforces exact domains because stable direct rules accept CIDRs, not DNS names |
 | `excludedCommands` (gateway commands run outside the sandbox with their own limits) | The hook passes gateway commands through unwrapped (they enforce their own limits) — Orbit replicates the exclusion matcher per command |
 | `failIfUnavailable: true` | At the hook layer: a failed wrapper build/launch denies the command with the reason (fail-closed per command). At run level: Orbit omits sandbox `failIfUnavailable` from the settings blob on native Windows (the built-in sandbox doesn't exist there) so the agent starts normally |
 
-**Rationale**: Orbit's policy model is already expressed as denyRead/allowWrite/allowedDomains; MXC's filesystem and network policy patterns match (deny-then-allow reads; allow-only writes and network). Command-level parity keeps the macOS/Linux sandbox surface (shell commands only) — Claude's file/web tools keep following permission rules exactly as they do on every platform.
+**Rationale**: Orbit's policy model is already expressed as denyRead/allowWrite/allowedDomains. MXC directly represents the filesystem policy. Its stable direct network rules are CIDR-only, so Orbit uses MXC's recommended proxy-only model: WFP blocks direct egress and the short-lived proxy resolves and checks each HTTP/S domain. Command-level parity keeps the macOS/Linux sandbox surface (shell commands only) — Claude's file/web tools keep following permission rules exactly as they do on every platform.
 
 **Alternatives considered**: whole-agent containment (stronger boundary, but rejected — Orbit must not intervene with Claude's own flows); wrapping outside Claude's hook layer (bypasses the permission pipeline and unsandboxed-retry semantics). Both rejected.
 
@@ -98,7 +98,7 @@ Inventory from exploration (all addressed by R3 tasks):
 
 ## D9 — Integration surface with Claude Code: per-command hook (owner-decision record)
 
-**Decision**: Orbit integrates MXC containment through Claude Code's documented hook layer — **a `PreToolUse` hook, matcher `Bash|PowerShell`**, that rewrites each shell command into an MXC executor invocation and returns `permissionDecision: "allow"` together with `updatedInput`. The agent process and its flows run unmodified.
+**Decision**: Orbit integrates MXC containment through Claude Code's documented hook layer — **a `PreToolUse` hook, matcher `Bash|PowerShell`**. Orbit enables Claude's native PowerShell tool as the primary Windows shell and rewrites those commands into the containment helper, returning `permissionDecision: "allow"` with `updatedInput`. The agent process and its flows run unmodified. Gateway exclusions still pass through. A residual Git Bash call is denied with a PowerShell retry because MXC 1.0 cannot initialize MSYS2; it never runs uncontained.
 
 **Verified against official hooks reference** (code.claude.com/docs/en/hooks.md, fetched 2026-11-04):
 - `PreToolUse` supports `updatedInput` "directly under `hookSpecificOutput` [which] replaces a tool's arguments before it runs"; the replaced input is re-evaluated against permission rules.
@@ -111,4 +111,4 @@ Inventory from exploration (all addressed by R3 tasks):
 
 **Alternatives considered**: whole-agent containment (rejected, owner decision 2026-11-04); static per-session container reuse (multi-command sessions would need lifecycle backends (`isolation_session`) and reintroduces agent-flow state, deferred; a per-command model is stateless and simpler).
 
-**Implementation-time verification required**: the tool names Claude Code exposes on Windows — whether shell calls surface as a `Bash` tool, a `PowerShell` tool, or another name — so the matcher matches the real surface; verified against the installed Claude Code before the hook-wiring task (T033) lands, mirroring D1's approach.
+**Implementation-time verification completed (2026-11-05)**: Claude Code documents both `Bash` and `PowerShell`; `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` makes PowerShell the primary shell on Windows. Real-host MXC 1.0.1 validation confirmed contained PowerShell works. Git Bash fails at the MSYS2 named-object boundary, matching Microsoft's open `microsoft/mxc#1061`, so Orbit denies that surface with a PowerShell retry instead of weakening containment.

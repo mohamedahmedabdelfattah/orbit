@@ -85,10 +85,10 @@
 
 **Goal**: zero regressions; ship-ready docs/CI (spec R5, SC4).
 
-- [ ] T090 [US8] Add `windows-latest` job to `.github/workflows/tests.yml` running the unit suite (fake executor; no MXC); keep the existing Ubuntu/WSL smoke jobs unchanged; include a workflow comment stating: "MXC containment itself is not part of automated testing (CI runners are Windows Server; MXC requires Windows 11 hosts) â€” fake-executor stubs cover the Orbit-side logic; see specs/001-windows-mxc-sandbox/quickstart.md for on-demand real-host validation"
+- [X] T090 [US8] Add `windows-latest` job to `.github/workflows/tests.yml` running the unit suite (fake executor; no MXC); keep the existing Ubuntu/WSL smoke jobs unchanged; include a workflow comment stating: "MXC containment itself is not part of automated testing (CI runners are Windows Server; MXC requires Windows 11 hosts) â€” fake-executor stubs cover the Orbit-side logic; see specs/001-windows-mxc-sandbox/quickstart.md for on-demand real-host validation"
 - [ ] T091 [P] [US8] Full-suite run on macOS/Linux/WSL2 confirming SC4 (no behavioral diffs; wsl cases byte-stable); fix any incidental breakage without touching mac/linux semantics
-- [ ] T092 [P] [US8] Release ops: bump `VERSION`, note the feature in `PRODUCT.md`/README header; docs mention (comment/hint only, not a checklist) that MXC real-host behavior is outside automated testing and quickstart.md is an on-demand validation guide
-- [ ] T093 [P] [US8] `tests/test_platforms.py` golden review: every new ORBIT_OS=windows assertion documented inline (why it exists, which spec rule it guards)
+- [X] T092 [P] [US8] Release ops: bump `VERSION`, note the feature in `PRODUCT.md`/README header; docs mention (comment/hint only, not a checklist) that MXC real-host behavior is outside automated testing and quickstart.md is an on-demand validation guide
+- [X] T093 [P] [US8] `tests/test_platforms.py` golden review: every new ORBIT_OS=windows assertion documented inline (why it exists, which spec rule it guards)
 
 ---
 
@@ -111,6 +111,27 @@ Phase 10 (US8) last (regression + release)
 - After T010â€“T014: run T012, T013, T015 simultaneously with T020 (US1) and T030 (US3) starting next.
 - Within US1: T024 âˆ¥ T025 after T022/T023.
 - Within US2: T080, T081, T082 all parallel.
+## Phase 11 — Convergence
+
+**Source**: `speckit-converge` assessment after `/speckit-implement` completed Phases 1–10.
+Phases 1–9 fully implemented in code; Phase 10 tasks T090 (CI workflow) present but T091–T093 incomplete.
+
+- [ ] T094 [US8] Full-suite regression on macOS/Linux/WSL2 confirming zero behavioral diffs (SC4): run `test_core test_channels test_tools test_calls test_platforms` on each platform; fix any incidental breakage without touching mac/linux branches byte-identical
+- [X] T095 [US8] Release ops: complete the feature bump from baseline 0.7.0 to 0.8.0, add MXC/native-Windows feature note to `PRODUCT.md` header and README; ensure docs carry the comment/hint that MXC real-host behavior is outside automated testing and quickstart.md is an on-demand validation guide
+- [X] T096 [US8] `tests/test_platforms.py` golden review: every new ORBIT_OS=windows assertion in `NativeWindows`, `WindowsService`, `WindowsDoctor`, `WindowsVoice`, `WindowsMode` classes documented inline — why it exists, which spec rule it guards (e.g. "guards R1.1: KIND detection")
+- [X] T097 [US8] Unrequested addition review: confirm `pypdf` and `playwright install chromium` are intentional parity with `install.sh` (Python document pipeline + headless browser); `setup-linux.sh` owns system packages and `install.sh` owns Linux Python packages
+
+## Phase 12 — Official MXC 1.0 convergence
+
+**Source**: implementation-time validation against Microsoft's signed MXC 1.0.1 release and stable schema 1.0.0.
+
+- [X] T098 [US3] Replace placeholder runtime installation and Orbit-only pseudo-schema: pin the official signed x64/ARM64 executor artifact with SHA-256 + Authenticode verification; emit exact stable-schema 1.0.0 fields; capability-probe the host; validate generated requests with the real executor
+- [X] T099 [US2] Close native execution gaps found on a real Windows 11 host: enforce owner domains through MXC's deny-direct proxy-only model, make Claude's contained PowerShell tool primary while Git Bash is fail-closed (`microsoft/mxc#1061`), add native `staff-*.cmd` launchers, and pass the real positive/negative/timeout containment probe
+
+**Pending cross-platform evidence (T091/T094)**: native validation is green. The current host has only an
+unusable WSL1 distro and no container runtime. An authorized temporary validation-branch push was attempted
+on 2026-11-05, but GitHub rejected it with HTTP 403; the owner chose not to create a temporary fork.
+
 
 ## Implementation strategy (MVP first)
 
