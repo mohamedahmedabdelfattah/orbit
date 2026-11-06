@@ -14,6 +14,8 @@ Native Windows employee shells are intended to run inside Microsoft Execution Co
 
 The security invariant for this feature is: **no model-proposed shell command reaches the Windows host unless it is one exact, currently authorized Orbit gateway invocation; every other shell command is either executed through verified MXC containment or denied. Any missing, malformed, stale, unsupported, or uncertain security state denies execution.**
 
+**MXC leakage policy**: A measured MXC data/access enforcement leak or side channel is advisory by default. Orbit MUST clearly warn the owner and record the affected boundary, but MUST NOT stop otherwise valid workflows solely because of that leak. If the owner explicitly denied the leaked resource or channel, the deny is authoritative and the affected native workflow MUST remain blocked. For this feature, the affected workflow is the employee's complete native shell-capable surface until policy changes or WSL2 is selected; non-shell/control-plane work remains available. Advisory-eligible leaks are limited to completed filesystem, registry, DNS, network, and UI canary measurements. This rule does not cover process survivors/cleanup failure, hook failure, uncontained host execution, employee-controlled policy, gateway integrity, dependency identity, request/launch failure, or missing/failed/inconclusive measurements; those remain blocking.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Shell Commands Fail Closed (Priority: P0)
@@ -41,7 +43,7 @@ An employee can write ordinary work files in its workspace but cannot influence 
 
 **Why this priority**: A policy controlled by the subject of that policy is not a security boundary.
 
-**Independent Test**: Pre-seed and modify workspace files with permissive policy data, including the legacy `state/mxc-policy.json`, profile security fields, project settings, and hook-bearing content. Attempt a secret read, an out-of-scope write, private-network access, and an unapproved public destination. Verify that every attempt remains denied and that trusted policy evidence is unchanged.
+**Independent Test**: Pre-seed and modify workspace files with permissive policy data, including the legacy `state/mxc-policy.json`, profile security fields, project settings, and hook-bearing content. Configure explicit owner denials for a secret, out-of-scope write, private-network access, and an unapproved public destination; verify every attempt remains denied and trusted policy evidence is unchanged. Separately run each leakage canary without an explicit owner deny and verify Orbit warns and records the limitation without blocking unrelated work.
 
 **Acceptance Scenarios**:
 
@@ -85,7 +87,7 @@ An owner cannot enter native MXC mode with an unsupported or unverified dependen
 1. **Given** Claude Code predates support for blocking hook failures, **When** setup or doctor checks containment, **Then** native MXC mode is blocked with one exact upgrade action.
 2. **Given** the MXC package, executor signature, architecture, version, or schema differs from the reviewed contract, **When** setup or doctor validates it, **Then** employee work remains blocked until the verified runtime is restored.
 3. **Given** a nominally supported Windows release is below MXC's documented minimum servicing build, **When** setup evaluates it, **Then** Orbit reports it as unsupported rather than relying on the release name alone.
-4. **Given** the installed runtime passes basic discovery but cannot enforce Orbit's actual filesystem and proxy policy, **When** Orbit probes the exact request shape, **Then** MXC mode is rejected.
+4. **Given** the installed runtime passes basic discovery but leaks part of Orbit's actual filesystem, registry, network, DNS, or UI policy, **When** Orbit probes the exact request shape, **Then** Orbit records and displays a warning while allowing workflows whose owner policy does not explicitly deny that leaked boundary; an explicit owner deny keeps the affected workflow blocked.
 5. **Given** a release candidate, **When** its containment evidence is reviewed, **Then** it includes real-client hook-failure results and real-host MXC positive and negative results for every Windows architecture shipped by Orbit.
 
 ### Edge Cases
@@ -104,6 +106,7 @@ An owner cannot enter native MXC mode with an unsupported or unverified dependen
 - The MXC package hash is correct but the selected architecture is wrong, a required companion is absent, or Authenticode trust cannot be established offline.
 - Windows reports a supported feature release but lacks the servicing update or runtime capability required for deny paths or the identity-less loopback proxy.
 - MXC discovery succeeds without a request, but the exact Orbit request is unsupported.
+- A real-host canary observes an MXC filesystem, registry, DNS, network, or UI leak. Orbit distinguishes advisory leakage from an explicit owner-deny breach and never silently suppresses the warning. A surviving process is a cleanup failure, not an advisory leak.
 - The owner deliberately selects WSL2 fallback. Existing WSL2 containment remains available and must not inherit native-Windows exceptions.
 
 ## Requirements *(mandatory)*
@@ -127,7 +130,7 @@ An owner cannot enter native MXC mode with an unsupported or unverified dependen
 
 - **FR-011**: Orbit MUST treat the complete employee workspace and all model-produced content as untrusted for containment, hook, gateway, and readiness decisions.
 - **FR-012**: `<employee workspace>/state/mxc-policy.json` and every other employee-writable cache MUST NOT be read as an authorization source. Existing copies MUST be ignored regardless of apparent validity.
-- **FR-013**: Access-granting policy fields MUST come only from owner-controlled state and Orbit's verified base policy. Employee-editable profile or workspace fields MAY provide non-security metadata but MUST NOT widen filesystem, network, timeout, gateway, or execution rights.
+- **FR-013**: Access-granting policy fields and explicit owner-deny fields MUST come only from owner-controlled state and Orbit's verified base policy. Employee-editable profile or workspace fields MAY provide non-security metadata but MUST NOT widen filesystem, network, timeout, gateway, or execution rights or remove an owner deny.
 - **FR-014**: If policy snapshots are used, they MUST live outside all employee write scopes; be bound to the intended employee, run, policy source state, Orbit release, and contract version; and reject missing, extra, malformed, stale, or mismatched data.
 - **FR-015**: Owner policy tightening MUST take effect no later than the next command. A stale snapshot MAY cause denial but MUST NOT preserve removed access.
 - **FR-016**: The policy used for a command MUST remain stable from authorization through request creation. A detected race or source change MUST deny the command and rebuild from trusted state.
@@ -150,11 +153,11 @@ An owner cannot enter native MXC mode with an unsupported or unverified dependen
 - **FR-027**: The reviewed MXC baseline is runtime package `1.0.1` with immutable stable request schema `1.0.0`. Any runtime or schema change MUST be treated as a new security-contract review, not a compatible patch by assumption.
 - **FR-028**: Orbit MUST obtain MXC only from a pinned official release source and MUST verify package digest, selected-architecture payload digest, Microsoft Authenticode publisher, and required runtime companions before installation or repair. Any mismatch MUST leave MXC mode blocked.
 - **FR-029**: Every emitted MXC request MUST validate against the exact published schema before use. Unknown, retired, experimental, or release-incompatible fields MUST fail closed.
-- **FR-030**: Readiness MUST run MXC's request-aware probe against Orbit's actual containment and proxy request shape, then run positive and negative containment workloads. A generic host probe alone is insufficient.
+- **FR-030**: Readiness MUST run MXC's request-aware probe against Orbit's actual containment and proxy request shape, then run positive and negative containment workloads. A generic host probe alone is insufficient. After every structural gate passes, a completed filesystem, registry, DNS, network, or UI leakage result MUST produce a bound warning and MAY enter `ready-with-warnings`; it MUST block the employee's complete native shell-capable surface only when deterministic matching finds an explicit owner deny. Missing, failed, or inconclusive measurement and any process survivor remain blocking.
 - **FR-031**: Windows support MUST follow MXC's exact servicing-build and runtime-capability contract, including required host preparation. Product-name checks such as "Windows 11 24H2" alone are insufficient.
-- **FR-032**: Setup and doctor output MUST show the effective Claude Code version and hook proof, MXC runtime and schema versions, artifact verification state, Windows build, request-aware probe result, last positive/negative proof, and one recovery action for each blocker.
-- **FR-033**: A release containing native Windows containment MUST NOT ship until the hook failure matrix, policy-tampering matrix, gateway bypass corpus, exact-schema validation, and real-host MXC proof pass for every Windows architecture that release supports.
-- **FR-034**: This P0 release gate supersedes prior statements that real-host MXC validation is optional or non-gating. The evidence MAY be automated or produced by a repeatable signed run, but it MUST be reviewable and tied to the release candidate.
+- **FR-032**: Setup and doctor output MUST show the effective Claude Code version and hook proof, MXC runtime and schema versions, artifact verification state, Windows build, request-aware probe result, last positive/negative proof, each advisory leakage warning, and one recovery action for each blocker. Warnings MUST state that work continues unless the owner explicitly denied the affected boundary.
+- **FR-033**: A release containing native Windows containment MUST NOT ship until the hook failure matrix, policy-tampering matrix, gateway bypass corpus, exact-schema validation, and real-host MXC proof complete for every Windows architecture that release supports. The leakage matrix passes when every result is correctly classified as enforced, advisory, or explicit-owner-deny breach; a breach in an explicit-deny scenario fails the release, while an advisory leak does not.
+- **FR-034**: This P0 release gate supersedes prior statements that real-host MXC validation is optional or non-gating. Producing and reviewing the evidence is mandatory even when it reports advisory leaks. The evidence MAY be automated or produced by a repeatable signed run, but it MUST be reviewable and tied to the release candidate.
 - **FR-035**: macOS, Linux, and WSL2 behavior MUST remain unchanged. WSL2 fallback MUST remain contained and MUST NOT reuse native-Windows gateway or hook exceptions.
 - **FR-036**: Existing native Windows installations MUST stop accepting employee shell work after upgrade until the new hook, trusted-policy, gateway, and dependency proofs pass. Existing team data MUST remain intact.
 
@@ -209,10 +212,10 @@ The following values define the reviewed baseline. They are security inputs, not
 ### Measurable Outcomes
 
 - **SC-001**: Across 100 repetitions of every hook failure class in User Story 1, zero host-marker commands execute and zero hook, helper, proxy, executor, or workload processes survive the deadline.
-- **SC-002**: Across the policy-tampering matrix, including pre-existing and raced workspace caches, profile fields, settings, skills, symlinks, and junctions, 100% of secret reads, out-of-scope writes, private-network connections, and unapproved-domain connections remain blocked.
+- **SC-002**: Across the policy-tampering matrix, including pre-existing and raced workspace caches, profile fields, settings, skills, symlinks, and junctions, 100% of attempts against explicitly owner-denied secrets, write targets, private-network destinations, and unapproved domains remain blocked. Canary leaks without an explicit owner deny are warned and audited without blocking unrelated work.
 - **SC-003**: In a gateway corpus containing every enabled gateway's valid forms and at least 50 bypass variants per gateway, 100% of canonical calls reach only the intended trusted gateway and zero non-canonical calls execute on the host.
-- **SC-004**: On each supported Windows architecture, a clean compatible installation and an upgraded installation both prove hook failure blocking, one allowed contained action, secret-read denial, outside-write denial, non-allowlisted-network denial, and timeout cleanup before accepting employee work.
-- **SC-005**: Every accepted native Windows run has a readiness result tied to the current employee-policy source, Orbit release, Claude Code behavior proof, MXC artifact/schema, architecture, and Windows build; stale or mismatched evidence results in zero employee shell executions.
+- **SC-004**: On each supported Windows architecture, a clean compatible installation and an upgraded installation both prove hook failure blocking, one allowed contained action, explicit-owner-deny enforcement for secret reads, outside writes, and non-allowlisted network access, leakage-warning continuation without an explicit deny, and timeout cleanup before accepting employee work.
+- **SC-005**: Every accepted native Windows run has a `ready` or `ready-with-warnings` result tied to the current employee-policy source, explicit owner denials, Orbit release, Claude Code behavior proof, MXC artifact/schema, architecture, and Windows build; stale or mismatched evidence results in zero employee shell executions.
 - **SC-006**: For each unsupported or tampered dependency case, setup or doctor identifies the blocker and one exact recovery action within 30 seconds, without exposing secret or sensitive policy data.
 - **SC-007**: All existing macOS, Linux, and WSL2 containment and gateway tests pass unchanged, and team data survives native-Windows blocking, repair, and fallback with zero loss.
 - **SC-008**: Independent security review of the release candidate finds zero path by which employee-controlled workspace content or a containment-hook failure can cause an arbitrary host process to execute.
