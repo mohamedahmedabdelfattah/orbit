@@ -78,11 +78,10 @@ def _context(name, role, scope):
 
 
 def _ask(system, prompt, schema, timeout=150):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_")) and k != "CLAUDECODE"}
-    if engine.registry().get("auth") == "api_key" and engine.secret("anthropic_api_key"):
-        env["ANTHROPIC_API_KEY"] = engine.secret("anthropic_api_key")
+    pol = engine.launch_policy("onboarding")               # L03: pass-through (user source) or legacy isolation
+    env, sources = pol["env"], pol["setting_sources"]
     cmd = [engine.resolve_claude(), "-p", "--model", "sonnet", "--effort", "low", "--tools", "",
-           "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config", "--output-format", "json",
+           "--no-session-persistence", "--setting-sources", sources, "--strict-mcp-config", "--output-format", "json",
            "--system-prompt", system, "--json-schema", json.dumps(schema)]
     r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=engine.HOME, env=env)
     try:

@@ -260,7 +260,7 @@ def fmt_tokens(n):
 
 
 def routine_slot():
-    """A crew of many shares one Claude plan: at most N routines run at once (the rest queue a few minutes).
+    """A crew of many shares one Claude connection: at most N routines run at once (the rest queue a few minutes).
     Chats and owner requests never wait for a slot."""
     if not SLOTS:
         SLOTS.append(threading.BoundedSemaphore(max(1, int(engine.registry().get("parallel_routines") or 2))))
@@ -271,7 +271,7 @@ def run_async(emp_id, prompt, job, session_key, deliver_to, who="", on_done=None
               retry=None):
     """Runs an employee in the background (one run at a time each). on_done(output) gets the final text.
     `said` is the owner's own words (for the chat log); the prompt wraps them. A routine that fails because this
-    computer was offline or the plan's limit was hit calls retry() instead of telling anyone: it runs again later."""
+    computer was offline or the Claude usage limit was hit calls retry() instead of telling anyone: it runs again later."""
     if job == "chat":
         import calls                                      # on a live call: point them at the running transcript
         prompt += calls.live_note(emp_id)

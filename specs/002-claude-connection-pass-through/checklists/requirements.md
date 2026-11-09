@@ -1,7 +1,9 @@
-# Specification Quality Checklist: Claude 3P Local Model Support
+# Specification Quality Checklist: Claude Connection Pass-Through
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
-**Created**: 2026-11-05
+
+**Created**: 2026-11-06
+
 **Feature**: [spec.md](../spec.md)
 
 ## Content Quality
@@ -31,6 +33,8 @@
 
 ## Notes
 
-- Validation iteration 1: all items passed.
-- User term "P3 gateway" is documented as the informed assumption "3P (third-party inference) gateway." No clarification marker is required because the local-model context gives a reasonable default.
-- Claude 3P, gateway compatibility, loopback-only scope, credential types, and minimum context capacity are product constraints and integration boundaries, not implementation choices.
+- Revised after owner rejected Orbit-managed 3P/local-provider support.
+- Owner selected exact Claude user-settings pass-through after reviewing hook/plugin trust tradeoff.
+- Refined after `/speckit-analyze` to make launch coverage, Cloud Shift freshness/isolation, diagnostic provenance, and repository-wide copy validation explicit.
+- Claude command names, status fields, and setting sources describe the external product boundary; they do not prescribe Orbit's internal language, framework, or module design.
+- `plan.md`, research, data model, launch contract, quickstart, and `tasks.md` now reflect the refinement; rerun `/speckit-analyze` before implementation.

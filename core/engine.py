@@ -5,8 +5,9 @@
     emp = engine.employee("sara")
     res = engine.run(emp, prompt, job="chat", session_key="12345")   # -> {"ok", "text", ...}
 
-Every run is the unmodified `claude` CLI, signed in with the owner's own Claude account (or their own
-API key), headless in the employee's folder, and gets whatever the employee's profile says:
+Every run is the unmodified `claude` CLI, using the connection its owner already configured there (a
+Claude account, an organization setup, or an API key), headless in the employee's folder, and gets
+whatever the employee's profile says:
   * the OS sandbox: shell commands reach only approved hosts and can't read secrets or colleagues'
     folders. The toolbelt gateways (staff-fetch, staff-browse, staff-apify, staff-watch) run outside
     it because they enforce their own limits (public web only, GET only, budget);
@@ -27,7 +28,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import tempfile
 import threading
@@ -190,6 +190,25 @@ def resolve_claude() -> str:
     return "claude"
 
 
+def claude_availability() -> dict:
+    """L01: three provider-neutral installation states for setup, doctor, the checklist and
+    Settings (FR-001–FR-004). The account is never probed here; a working configured connection
+    only shows itself at the first real Claude run."""
+    c = resolve_claude()
+    if not (shutil.which(c) or os.path.isfile(c)):
+        return {"state": "missing",
+                "detail": "Claude Code isn't installed. Install it from https://claude.com/claude-code, then try again."}
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    try:
+        r = subprocess.run([c, "--version"], capture_output=True, text=True, timeout=90, env=env)
+    except (OSError, ValueError):
+        r = None
+    if r is None or r.returncode != 0:
+        return {"state": "broken",
+                "detail": "Claude Code couldn't run: repair or update it (https://claude.com/claude-code), then retry."}
+    return {"state": "available", "detail": "Claude Code is installed and available."}
+
+
 def secret(name: str):
     try:
         with open(os.path.join(SECRETS, name), encoding="utf-8") as fh:
@@ -218,10 +237,19 @@ def drop_secret(name: str) -> None:
         pass
 
 
-def clean_env(emp: dict) -> dict:
-    """The CLI signs in with its own login (keychain). Nothing of the caller's Claude settings leaks in."""
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDE_AGENT_SDK")) and k != "CLAUDECODE"}
+# ------------------------------------------------------------------ launch policy and pass-through
+LEGACY_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "CLAUDE_AGENT_SDK")   # only the legacy stored-key mode filters these
+
+
+def legacy_api_key_mode() -> bool:
+    """One install keeps its existing isolated compatibility path (FR-012): staff.json auth is
+    api_key and a stored Orbit key exists. Every other install runs pass-through (FR-005)."""
+    return registry().get("auth") == "api_key" and bool(secret("anthropic_api_key"))
+
+
+def _employee_runtime(emp: dict, env: dict) -> dict:
+    """The enumerated Orbit-owned employee keys (contracts/claude-launch.md): each wins over a
+    same-named inherited value, in ordinary and legacy mode alike."""
     env["HOME"] = H
     env["PATH"] = os.pathsep.join([BIN, os.path.dirname(resolve_claude())] + osinfo.path_dirs())
     env["CLAUDE_CODE_FORK_SUBAGENT"] = "0"              # no hidden conversation-copying subagents
@@ -239,9 +267,40 @@ def clean_env(emp: dict) -> dict:
     if os.path.exists("/etc/ssl/cert.pem"):               # TLS for curl/Go tools inside the sandbox
         env.setdefault("SSL_CERT_FILE", "/etc/ssl/cert.pem")
         env.setdefault("CURL_CA_BUNDLE", "/etc/ssl/cert.pem")
-    if registry().get("auth") == "api_key" and secret("anthropic_api_key"):
-        env["ANTHROPIC_API_KEY"] = secret("anthropic_api_key")   # the owner's own key, billed to them
     return env
+
+
+def launch_policy(kind: str, emp: dict = None) -> dict:
+    """The one ordinary-versus-legacy seam (FR-007; contracts/claude-launch.md L02/L03/L04).
+    kind is 'employee' (every employee model work launch), 'onboarding' (structured hiring),
+    or 'plugin' (guard-plugin administration, no inference).
+
+    Ordinary pass-through keeps the WHOLE inherited process environment — a documented trust
+    decision: unrelated values, including any secrets in the service environment, reach Claude
+    by design (FR-005/FR-025) — removes only the CLAUDECODE recursion marker, and overlays the
+    enumerated Orbit-owned keys for employee runs. Legacy stored-key mode keeps its existing
+    prefix-filter isolation and injects only the stored key, for inference only (never plugin
+    administration). Returns {"mode": "ordinary"|"legacy", "env": dict, "setting_sources": str|None}."""
+    if kind not in ("employee", "onboarding", "plugin"):
+        raise ValueError("unknown launch kind %r" % kind)
+    legacy = legacy_api_key_mode()
+    inherit = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}     # the recursion marker is the one deletion
+    env = {k: v for k, v in inherit.items() if not k.startswith(LEGACY_ENV_PREFIXES)} if legacy else dict(inherit)
+    if kind == "employee":
+        _employee_runtime(emp, env)
+    if legacy and kind in ("employee", "onboarding"):    # inference only; plugin administration never sees the key
+        env["ANTHROPIC_API_KEY"] = secret("anthropic_api_key")
+    if legacy:
+        sources = "project" if kind == "employee" else ("" if kind == "onboarding" else None)
+    else:
+        sources = {"employee": "user,project", "onboarding": "user", "plugin": None}[kind]
+    return {"mode": "legacy" if legacy else "ordinary", "env": env, "setting_sources": sources}
+
+
+def clean_env(emp: dict) -> dict:
+    """The employee launch environment (L02): direct pass-through in ordinary mode, the existing
+    isolated environment in legacy stored-key mode. Callers consume launch_policy for the argv."""
+    return launch_policy("employee", emp)["env"]
 
 
 def autonomous(emp: dict) -> bool:
@@ -345,7 +404,7 @@ def command(emp: dict, model: str) -> list:
         mcp = ["--mcp-config", path]
     cmd = [resolve_claude(), "-p", "--model", model, "--effort", emp.get("effort", "medium"),
            "--permission-mode", "bypassPermissions" if autonomous(emp) else "dontAsk", "--output-format", "stream-json", "--verbose",
-           "--setting-sources", "project", "--strict-mcp-config", *mcp,
+           "--setting-sources", launch_policy("employee", emp)["setting_sources"], "--strict-mcp-config", *mcp,
            "--settings", settings_json(emp, gateways), "--plugin-dir", GUARD, "--plugin-dir", bundle,
            "--append-system-prompt", "Paths: your team folder (~/Staff in the handbook) is %s; the kit (the handbook, "
            "skills and tools) is %s. %s" % (HOME, KIT, abilities.prompt(emp["id"])),
@@ -359,49 +418,32 @@ def command(emp: dict, model: str) -> list:
     return cmd
 
 
-NETWORK = re.compile(r"ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network|reach the API", re.I)
-
-
-def online(timeout: float = 4) -> bool:
-    """Can this computer reach Claude right now? A DNS lookup and a TCP connect to the API; nothing is sent.
-    Behind a proxy we can't tell, so we say yes and let the run find out."""
-    if any(os.environ.get(k) for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY")):
-        return True
-    try:
-        with socket.create_connection(("api.anthropic.com", 443), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def wait_online(limit: int = 600, every: int = 20) -> bool:
-    """After a network failure (the Mac just woke up, the Wi-Fi dropped): wait up to `limit` seconds for it back."""
-    end = time.time() + limit
-    while time.time() < end:
-        if online():
-            return True
-        time.sleep(every)
-    return online()
+NETWORK = re.compile(
+    r"ENOTFOUND|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network|reach the API|contacting the API|"
+    r"connection refused|connection reset|temporarily unavailable", re.I)
 
 
 def friendly_error(err: str) -> str:
+    """Owner-facing wording for a failed run: the failure class in plain words, never a provider name,
+    an install-time account status, or a guessed provider detail (FR-015)."""
     if re.search(r"usage limit|rate limit|limit reached", err, re.I):
         return "I've hit the Claude usage limit; I'll pick this up after it resets. Nothing is lost."
     if re.search(r"authenticate|OAuth|not logged in|log in", err, re.I):
-        return osinfo.local("My Claude sign-in on this Mac has expired. Owner: run `claude auth login` in Terminal.")
+        return "I couldn't authenticate with Claude on this computer. Owner: check the Claude connection on this PC."
     if NETWORK.search(err):
-        return "I couldn't reach Claude for 10 minutes: this computer looks asleep or offline. Send it again when it's back."
+        return "I couldn't reach Claude: this computer looks asleep or offline. Send it again when it's back."
     return "Something went wrong on my side (logged). Please resend."
 
 
 def why_failed(err: str) -> str:
-    """The reason a routine didn't run, in a few plain words (for the team room)."""
+    """The reason a routine didn't run, in a few plain words (for the team room). Provider-neutral: it
+    names the failure class, not a provider or an account to set up (FR-015)."""
     if NETWORK.search(err):
         return "this computer was asleep or offline when it was due"
     if re.search(r"usage limit|rate limit|limit reached", err, re.I):
-        return "your Claude plan's limit was reached"
+        return "the Claude usage limit was reached"
     if re.search(r"authenticate|OAuth|not logged in|log in", err, re.I):
-        return "my Claude sign-in expired (run `claude auth login` in a terminal)"
+        return "I couldn't authenticate with Claude on this computer"
     if re.search(r"timed out", err, re.I):
         return "it ran out of time"
     return "an error on my side (logged)"
@@ -464,7 +506,8 @@ def stream(cmd: list, prompt: str, ws: str, env: dict, timeout: int, on_step=Non
 def run(emp: dict, prompt: str, job: str = "chat", session_key: str = None,
         timeout: int = 1800, extra_env: dict = None, on_step=None) -> dict:
     """Run the employee headless in its folder. Chats resume one session per (employee, person).
-    on_step(step, steps) is called live for every tool call; the steps also come back in the result."""
+    on_step(step, steps) is called live for every tool call; the steps also come back in the result.
+    Nothing probes the provider's reachability first: Claude's own process result is the source of truth."""
     if os.environ.get("STAFFROOM_DEMO"):                  # `orbit demo`: canned answers, no Claude run
         import demo
         return demo.fake_run(emp, prompt, job, session_key, on_step)
@@ -490,8 +533,6 @@ def run(emp: dict, prompt: str, job: str = "chat", session_key: str = None,
         attempts.append(("resume", sessions[session_key]))
     attempts.append(("new", str(uuid.uuid4())))
     t0, d, steps = time.time(), {}, []
-    if not online():
-        wait_online()                                      # just woke up, or the Wi-Fi dropped: give it up to 10 minutes
     for kind, sid in attempts:
         cmd = base + (["--resume", sid] if kind == "resume" else ["--session-id", sid])
         d, steps = stream(cmd, prompt, ws, {**clean_env(emp), **(extra_env or {})}, timeout, on_step)
@@ -502,15 +543,6 @@ def run(emp: dict, prompt: str, job: str = "chat", session_key: str = None,
                 with open(sessions_f, "w") as fh:
                     json.dump(sessions, fh, indent=1)
             break
-        if NETWORK.search(str(d.get("result", ""))) and wait_online():
-            d, steps = stream(cmd, prompt, ws, {**clean_env(emp), **(extra_env or {})}, timeout, on_step)   # back online: once more
-            if not d.get("is_error"):
-                if session_key:
-                    sessions[session_key] = sid
-                    os.makedirs(os.path.dirname(sessions_f), exist_ok=True)
-                    with open(sessions_f, "w") as fh:
-                        json.dump(sessions, fh, indent=1)
-                break
         if re.search(r"limit|authenticate", str(d.get("result", ""))) or NETWORK.search(str(d.get("result", ""))):
             break                                          # a fresh session won't help
     err = str(d.get("result", "")) if d.get("is_error") else ""
@@ -637,7 +669,7 @@ def claude_session(emp_id: str) -> dict:
         have = ""
     installed = (local.get("enabledPlugins") or {}).get("staff-guard@orbit")
     if not installed or have != version:                   # the guard is copied in at install: refresh it when the kit's changes
-        env_cli = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_")) and k != "CLAUDECODE"}
+        env_cli = launch_policy("plugin")["env"]           # pass-through, or legacy isolation; never the stored inference key
         steps = ([["plugin", "marketplace", "add", os.path.join(KIT, "core"), "--scope", "local"],
                   ["plugin", "install", "staff-guard@orbit", "--scope", "local"]] if not installed else
                  [["plugin", "marketplace", "update", "orbit"], ["plugin", "update", "staff-guard@orbit", "--scope", "local"]])

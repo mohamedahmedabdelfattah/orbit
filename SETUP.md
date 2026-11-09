@@ -1,15 +1,24 @@
 # Setting up Orbit (instructions for Claude)
 
 Someone asked you to set up Orbit on their computer: a crew of AI employees that runs on this computer
-and on their own Claude plan. It works on a Mac, on Windows (natively, or through WSL2 as the fallback)
-and on Linux. They may not be technical. Do every step yourself. Before each step, say in one
-plain sentence what it does and why; after it, say what happened. Keep it calm and short.
+through Claude Code. Claude Code can use whatever connection the owner already has configured — their
+own Claude plan, an organization setup, or another supported configuration. Orbit only needs the
+client installed; it never signs in, checks or changes that connection. It works on a Mac, on Windows
+(natively, or through WSL2 as the fallback) and on Linux. They may not be technical. Do every step
+yourself. Before each step, say in one plain sentence what it does and why; after it, say what
+happened. Keep it calm and short.
 
 **Never ask for, read, copy or print a password, a token or a Claude login** in this chat. Bot tokens
 and the Apify token are typed into the control panel, a page on this computer, never here. Don't use
 `sudo` and don't run anything as administrator yourself, don't change system settings, and when a step
 needs their password or an administrator window, tell them exactly what to type and where, then wait.
 If a step fails twice, stop and tell them plainly what failed and what you'd try next.
+
+Claude's connection belongs to the owner. Do not sign in to Claude for them, ask them to sign in as a
+setup step, or run account commands for them. The readiness check is only that the installed client
+runs (`claude --version`). If they already use Claude Code on this computer, leave its configuration
+alone; ordinary work will use it. If they want to change how Claude connects, that is Claude Code's own
+setup, outside Orbit's install.
 
 ## 1. Which computer
 - `uname -s` says `Darwin`: a Mac. Follow **Mac** below.
@@ -23,15 +32,20 @@ If a step fails twice, stop and tell them plainly what failed and what you'd try
    tools in a dialog: tell them to click **Install**, wait for it to finish (a few minutes), then go on.
 2. Get the kit. If `~/orbit` is already a checkout of this repository: `git -C ~/orbit pull --ff-only`.
    Otherwise: `git clone https://github.com/BasemTarekkamal/orbit ~/orbit`.
-3. Claude Code for the employees. The employees run on the `claude` command-line tool, signed in with
-   the person's own Claude account (the plan they already pay for). It is Anthropic's own program;
-   Orbit never sees their login.
+3. Claude Code for the employees. The employees run on the `claude` command-line tool. It is
+   Anthropic's own program; Orbit never sees or stores its connection details, and it does not need
+   the owner's account details here.
    - `claude --version` (also try `~/.local/bin/claude --version`). If it isn't there, install it with
-     Anthropic's official installer: `curl -fsSL https://claude.ai/install.sh | bash`.
-   - `claude auth status`. If it's signed in, go on. If not, tell them: "A page from Anthropic will open
-     in your browser; sign in there with your Claude account." Run `claude auth login` with a long
-     timeout. If it waits for something typed, ask them to open Terminal (⌘ Space, type Terminal,
-     Enter), run `claude auth login` there, and tell you when it says they're signed in. Never sign them out.
+     Anthropic's official installer: `curl -fsSL https://claude.ai/install.sh | bash`, then check
+     `claude --version` again. That is the whole readiness check: an installed client that runs.
+   - Leave Claude's existing configuration alone. If the owner already uses Claude Code on this
+     computer, ordinary work will use that connection. If they ask how to configure it, point them to
+     Claude Code's own setup; don't run account commands for them.
+   - For unattended work (routines, reports, or messages while no Terminal window is open), that
+     connection must stay available to the background service after this window closes. Normally that
+     means Claude's persistent sign-in, Claude user/managed settings, or the environment of the OS
+     service — not a temporary export typed in this shell. Ask them to configure it once in Claude Code
+     if it isn't already.
 4. Install: `~/orbit/install.sh --yes`. It installs a few Python packages for this user only, the
    headless browser the employees research with (about 150 MB), and the `orbit` command, then starts
    the team's background service and opens the control panel in their browser. Two to five minutes.
@@ -44,10 +58,12 @@ shell, no restarts. You run commands from here (Claude, PowerShell or Terminal) 
 installer/doctor sends older or unsupported builds to the WSL2 fallback below.
 1. Get the kit. If the folder (say `C:\Users\them\orbit`) is already a checkout: `git -C <kit> pull --ff-only`.
    Otherwise: `git clone https://github.com/BasemTarekkamal/orbit <kit>`.
-2. Claude Code for the employees, signed in with their own Claude account. `claude --version`, then
-   `claude auth status`. If it's missing or not signed in, have them install Claude Code for Windows
-   (https://claude.com/claude-code) and run `claude auth login` in their own window — a page opens in
-   their browser; nothing typed comes back to this chat.
+2. Claude Code for the employees. `claude --version`; if it's missing, have them install Claude Code
+   for Windows (https://claude.com/claude-code), then check `claude --version` again. Leave their
+   existing Claude configuration alone — Orbit uses it as-is and never sees the connection details.
+   If they ask to change it, point them to Claude Code's own setup; don't run account commands for
+   them. Unattended routines need that configuration to persist for the background service, normally
+   through Claude's own persistent sign-in or user/managed settings, not a one-off shell setting.
 3. `powershell -ExecutionPolicy Bypass -File <kit>\setup-windows.ps1` (add `-Yes` to skip the optional
    voice-notes prompts). It checks the Windows build, installs Python, git, ffmpeg and tesseract with
    winget, installs the signed MXC sandbox runtime into the kit's `vendor\mxc` (checksum and Microsoft
@@ -76,11 +92,12 @@ usually `Ubuntu`). Quote the command so the Windows shell passes it through whol
    them to type this in the Ubuntu window and wait until it prints Done:
    `sudo sh ~/orbit/setup-linux.sh`
    (if ~/orbit isn't there yet: `sudo apt-get update && sudo apt-get install -y git`, then step 2, then this).
-4. Claude Code inside Ubuntu (the employees run on this copy; it signs in to the same Claude account):
+4. Claude Code inside Ubuntu (the employees run on this copy):
    `wsl -d <distro> -- bash -lc "~/.local/bin/claude --version || curl -fsSL https://claude.ai/install.sh | bash"`.
-   Then `wsl -d <distro> -- bash -lc "~/.local/bin/claude auth status"`. If it isn't signed in, ask them
-   to type `~/.local/bin/claude auth login` in the Ubuntu window, open the link it shows, sign in with
-   their Claude account, and tell you when it says they're signed in.
+   Then check `wsl -d <distro> -- bash -lc "~/.local/bin/claude --version"` again. Use the same Claude
+   configuration they already use: Orbit doesn't sign them in or inspect the account. If it needs
+   configuring for unattended routines, do it once in Claude Code itself, so it persists for the
+   background service.
 5. Install: `wsl -d <distro> -- bash -lc "~/orbit/install.sh --yes"`. It starts the team from the
    Windows side (it keeps running after the Ubuntu window closes, and starts again at every Windows
    login) and opens Mission Control in their Windows browser. If it reports a problem:
@@ -92,8 +109,8 @@ usually `Ubuntu`). Quote the command so the Windows shell passes it through whol
    (`command -v bwrap socat git; python3 -m pip --version`), get the kit if you can
    (`git clone https://github.com/BasemTarekkamal/orbit ~/orbit`), then ask them to run in their own
    terminal, where it asks their password: `sudo sh ~/orbit/setup-linux.sh`. Wait until it prints Done.
-2. Claude Code: as in **Mac** step 3 (`curl -fsSL https://claude.ai/install.sh | bash`, `claude auth status`,
-   and if needed they run `claude auth login` themselves).
+2. Claude Code: as in **Mac** step 3 (`curl -fsSL https://claude.ai/install.sh | bash`, then
+   `claude --version`). Keep the connection they already use; don't change or inspect it.
 3. Install: `~/orbit/install.sh --yes`. If it reports a problem, run `~/orbit/orbit doctor`.
 4. Hand over (below).
 
@@ -119,6 +136,22 @@ Tell them, in your own words, short:
   that need the owner. They never post, buy, or message anyone but the owners.
 Then offer to stay while they connect their phone. That's the whole setup.
 
+## What Orbit trusts (say this plainly if they ask)
+- **Their Claude configuration is theirs.** Ordinary local runs load the owner's Claude user and
+  project settings, including hooks and plugins. Those are trusted configuration and may run; Orbit
+  does not review, sandbox or vouch for them.
+- **Ordinary runs pass the service environment through.** Claude receives the background service's
+  complete inherited environment — Claude/provider values and any unrelated values present, including
+  secrets. Orbit does not add credential isolation beyond Claude's own behavior.
+- **Cloud Shift is separate and optional.** It needs a qualifying Claude plan account available on
+  this computer and a fresh check before each cloud launch. If it isn't eligible, only cloud launches
+  are blocked with an account-only explanation; ordinary local work keeps running. Turning Cloud
+  Shift off never needs the account. Orbit cannot promise to revoke a remote schedule created while
+  this computer was offline.
+- **Diagnose Claude by Claude's own result.** If a run fails, verify the client's configured connection
+  by running `claude` directly, then `orbit doctor`. Orbit reports Claude's own result and does not
+  guess a provider, endpoint, locality or fallback.
+
 ## Extras, only when they ask
 - **Voice notes and live calls** (transcribed on this computer):
   - Mac: needs Homebrew. If `brew --version` fails, explain that installing Homebrew asks for their Mac
@@ -132,8 +165,9 @@ Then offer to stay while they connect their phone. That's the whole setup.
     speech engine, a few minutes, and downloads the 550 MB model). For live calls, Python for Windows is
     needed too: ask them to run in PowerShell `winget install Python.Python.3.12`, then
     `py -m pip install soundcard numpy`.
-- **Sign Claude Code in again:** `claude auth login` (in a Windows window, or in the Ubuntu window on
-  the WSL fallback).
+- **Change how Claude connects:** that is Claude Code's own setup, done once by the owner. After they
+  change it, verify by running `claude` directly; Orbit uses it on the next run. Never sign them out.
+  Cloud Shift, if they use it, shows its own account status in Settings.
 - **Update Orbit:** `git -C ~/orbit pull --ff-only && ~/orbit/orbit restart`.
 - **Something's wrong:** `~/orbit/orbit doctor`, then `~/orbit/orbit logs`.
 - **Stop it:** `~/orbit/orbit stop`. Their team's folder (`~/Staff`) stays unless they ask you to

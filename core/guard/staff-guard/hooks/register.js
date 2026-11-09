@@ -397,7 +397,7 @@ export function register(on) {
     return { result: masked.result, context: (result.context || []).concat(['staff-guard masked a card number/IBAN in this output.']) }
   })
 
-  // Record Claude plan usage after each turn, so the engine can switch to a lighter model before the
+  // Record Claude usage after each turn, so the engine can switch to a lighter model before the
   // limit hits. Observe-only: always passes the event on.
   on('session.measure', async ($, e, next) => {
     if (e.rateLimits && e.rateLimits.length) {

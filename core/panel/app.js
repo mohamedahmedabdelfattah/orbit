@@ -494,7 +494,7 @@ function cardHtml(sel, ob, name, from) {
         <p class="meta">Apps ${esc(name || 'they')} can work in. The first time, you sign in to each in a Claude session with them. More in Manage, any time.</p></section>` : ''}
       <section class="wide grant"><h3>${icon('claude')} How independent?</h3>
         <div class="seg budget" role="group" aria-label="Independence"><button type="button" class="${ed.autonomy ? '' : 'on'}" data-act="ob-autonomy" data-v=""><b>Checks in with me</b><span>Asks before anything new or public</span></button><button type="button" class="${ed.autonomy ? 'on' : ''}" data-act="ob-autonomy" data-v="1"><b>Full autonomy</b><span>Does the whole job, finds its own tools; the sandbox keeps it in its folder</span></button></div></section>
-      <p class="meta card-cloud">${icon('claude')} If this ${MAC()} is closed or offline, they keep working in Anthropic's cloud, on your Claude plan. Turn it off any time in their Manage tab.</p>
+      ${(S.data.cloud_shift || {}).eligible ? `<p class="meta card-cloud">${icon('claude')} If this ${MAC()} is closed or offline, they keep working in Anthropic's cloud, on your Claude plan. Turn it off any time in their Manage tab.</p>` : ''}
       <section><h3>Tools</h3>${access}</section>
       <section><h3>Routines</h3><div class="chips">${routines}</div><p class="meta">Reports land in the team room and on your phone.</p></section>
       <section class="wide"><h3>Weekly budget on your Claude plan</h3><div class="seg budget" role="group" aria-label="Weekly budget">${budget}</div>
@@ -711,14 +711,18 @@ async function loadConnectors(emp, q = '') {
   S.connLoading = ''; render(false);
 }
 // Laptop first; when this computer is closed or offline, they keep working on Anthropic's cloud, on the owner's plan.
+// Cloud Shift is a separate account contract: ineligible means cloud launches are blocked, never that local work is.
 function cloudSection(e) {
   const c = e.cloud || {};
-  const state = c.on ? `<span class="badge accent">On</span>` : `<span class="badge">Off</span>`;
-  const when = c.on && c.next_shift ? `<p class="meta">While this ${MAC()} is on, ${esc(e.name)} works here. If it's closed or offline, the next cloud shift starts ${esc(c.next_shift)}.${c.last_shift ? ` Last cloud shift: ${esc(c.last_shift)}.` : ''}${c.session ? ` <a class="link" href="${esc(c.session)}" target="_blank" rel="noopener">Open their cloud desk</a>` : ''}</p>` : '';
+  const eligible = c.eligible !== false;
+  const on = !!c.on;
+  const state = on ? `<span class="badge ${eligible ? 'accent' : ''}">On</span>` : `<span class="badge">Off</span>`;
+  const when = on && c.next_shift ? `<p class="meta">While this ${MAC()} is on, ${esc(e.name)} works here. If it's closed or offline, the next cloud shift starts ${esc(c.next_shift)}.${c.last_shift ? ` Last cloud shift: ${esc(c.last_shift)}.` : ''}${c.session ? ` <a class="link" href="${esc(c.session)}" target="_blank" rel="noopener">Open their cloud desk</a>` : ''}</p>` : '';
+  const account = !eligible ? `<p class="meta warn-text">${esc(c.why_not || 'The cloud shift needs a Claude plan sign-in on this computer.')} ${esc(e.name)} still works here; local work is not affected.</p>` : (c.why_not ? `<p class="meta warn-text">${esc(c.why_not)}</p>` : '');
   return `<section class="grant"><h2>${icon('claude')} Cloud shift</h2>
     <p class="desc">${esc(e.name)} works on this ${MAC()} first. When it's closed or offline, they carry on in Anthropic's cloud, on your own Claude plan: research, plans, scripts and code, with a report to your phone. When this ${MAC()} is back, they bring that work home. The cloud has no access to your Chrome or your accounts, so anything that needs them waits for this ${MAC()}. ${state}</p>
-    ${when}${c.error ? `<p class="meta warn-text">${esc(c.error)}</p>` : ''}${c.why_not ? `<p class="meta warn-text">${esc(c.why_not)}</p>` : ''}
-    <div class="save-bar"><button type="button" class="btn ${c.on ? '' : 'btn-primary'}" data-act="order" data-kind="set_cloud" data-emp="${e.id}" data-on="${c.on ? '' : '1'}" ${c.why_not ? 'disabled' : ''}>${c.on ? 'Turn off' : 'Turn on the cloud shift'}</button></div></section>`;
+    ${when}${account}${c.error ? `<p class="meta warn-text">${esc(c.error)}</p>` : ''}
+    <div class="save-bar"><button type="button" class="btn ${on ? '' : 'btn-primary'}" data-act="order" data-kind="set_cloud" data-emp="${e.id}" data-on="${on ? '' : '1'}" ${(!on && !eligible) ? 'disabled' : ''}>${on ? 'Turn off' : 'Turn on the cloud shift'}</button></div></section>`;
 }
 function autonomySection(e) {
   const on = (e.abilities || []).includes('full_autonomy');
@@ -1124,7 +1128,7 @@ PAGES.settings = () => {
     ${pending ? `<h3>Messaged your bot</h3>${pending}` : `<p class="meta">Nobody is waiting for approval.</p>`}</section>
   <section><h2>Appearance</h2><div class="seg" role="group" aria-label="Appearance"><button data-act="theme" data-v="" class="${S.theme === '' ? 'on' : ''}">${MAC() === 'PC' ? 'Match Windows' : MAC() === 'Mac' ? 'Match the Mac' : 'Match the system'}</button><button data-act="theme" data-v="light" class="${S.theme === 'light' ? 'on' : ''}">Light</button><button data-act="theme" data-v="dark" class="${S.theme === 'dark' ? 'on' : ''}">Dark</button></div></section>
   <section><h2>About this install</h2>
-    <dl class="kv"><dt>Claude</dt><dd>${s.claude.ok ? `signed in (${esc(s.claude.note)})` : '<span class="badge danger">not signed in</span> ask Claude: “Sign in Claude Code for my Orbit.”'} · runs on ${s.auth === 'api_key' ? 'your API key' : 'your subscription'}</dd>
+    <dl class="kv"><dt>Claude</dt><dd>${s.claude.state === 'available' ? 'installed and available' : `<span class="badge danger">${esc(s.claude.state)}</span> ${esc(s.claude.detail)}`} · runs on ${s.auth === 'api_key' ? 'your API key' : 'your subscription'}</dd>
       <dt>Service</dt><dd>${d.online ? 'running' : '<span class="badge danger">stopped</span>'} · panel on port ${s.port}</dd>
       <dt>Team folder</dt><dd><code>${esc(s.home)}</code></dd><dt>Kit</dt><dd><code>${esc(s.kit)}</code></dd></dl></section>
   <section><h2>History</h2>${orders.length ? `<div class="list mini">${orders.map((o) => `<div class="row row-2"><div><div class="small">${esc(o.summary)}</div><div class="meta">${esc(o.by)} · ${fmtTime(o.ts)}${o.result ? ' · ' + esc(o.result) : ''}</div></div><span class="badge ${o.status === 'failed' ? 'danger' : ''}">${esc(o.status)}</span></div>`).join('')}</div>` : '<p class="quiet">Nothing yet.</p>'}</section>
