@@ -1,14 +1,16 @@
 # Implementation Plan: Fail-Closed Native Windows Containment
 
 **Feature**: `003-close-containment-gaps` — [spec.md](./spec.md)
-**Status**: Plan complete; adversarial security re-review passed
+**Status**: Plan complete; planning-stage adversarial security review passed (release-candidate review remains in scope per SC-008)
 **Priority**: P0 security fix
-**Branch**: detached `HEAD` at `044c99d`; no branch created
+**Branch**: `main` at `8c81d11`; feature 003 planning branch merged via PR #2
 **Plan path**: `specs/003-close-containment-gaps/plan.md`
 
 ## Setup note
 
 This checkout has `.specify/feature.json` but no `.specify/scripts/`, plan template, or `.specify/memory/constitution.md`. The prescribed setup script therefore could not run on this Windows host. The active feature was resolved from `.specify/feature.json`; this plan follows the latest checked-in feature-001 plan structure and records the missing constitution as N/A. No extension hooks are registered.
+
+Re-validated 2026-11-09 against `main` at `8c81d11`. Feature 002 (`b310ae7`) is merged: it adds `core/cloud.py` and touches `core/engine.py`/`core/staffd.py`, but none of those edits create a native-Windows shell, hook, gateway, or policy path, so the native branch and the plan's `engine.py` touch-point remain valid. The previously committed `=======` marker in `tests/test_platforms.py` was removed in `b310ae7`; the delivery sequence and risk table below were updated to match.
 
 ## Technical Context
 
@@ -88,6 +90,15 @@ engine.run() -- native MXC gate ------+
                                     -> apify/compute only, childless in-process HTTPS
 ```
 
+### Terminology
+
+These four names are distinct and must not be used interchangeably in code, tests, or messages:
+
+- **Policy helper** — the signed `orbit-policy-helper.exe` selected by Claude's `policyHelper.path`; it emits the managed hook/permission document for one Orbit launch nonce.
+- **Ticket helper** — the Orbit-side process that claims a contained execution ticket and starts the verified executor path; it never launches a host shell and never retries the original command.
+- **Containment broker** — the `OrbitContainmentBroker` service that creates the worker token, private desktop, and Job Object and starts the executor under the dedicated identity.
+- **Executor** — Microsoft's verified `wxc-exec.exe` that runs the contained workload.
+
 ### Core invariants
 
 1. Hook and dispatcher APIs return closed enums, never booleans/no-decision.
@@ -106,6 +117,7 @@ engine.run() -- native MXC gate ------+
 | --- | --- |
 | `core/contracts/native-windows-containment-1.json` | Single closed external/release manifest consumed by Python and PowerShell |
 | `core/contracts/windows-evidence-trust-v1.json` | Store/prior-release-pinned TPM RSA runner and offline Ed25519 key roles, revocations/rotation, canonical signature format, publication identity |
+| `requirements-native-windows.lock` | Complete hash-locked Python dependency set (`jsonschema==4.25.1` plus transitive wheels) consumed by setup and runtime; nothing is installed at run time |
 | `native/orbit-policy-helper/` -> signed x64/ARM64 `orbit-policy-helper.exe` | No-argument HKLM `policyHelper.path`; fixed env + authenticated named-pipe nonce protocol; managed policy JSON/receipt |
 | `core/claude_api_relay.py` | No-fallback loopback relay to Anthropic API; suppresses server-managed fetch and emits health receipt |
 | `core/windows_policy_watch.py` | Independent HKLM/managed-file/helper/relay mutation watchers and process-tree stop |
@@ -161,7 +173,7 @@ engine.run() -- native MXC gate ------+
 ## Delivery Sequence
 
 1. **Restore trustworthy test baseline**
-   - Remove the committed `=======` marker.
+   - Remove the committed `=======` marker. Done in `b310ae7`; `tests/test_platforms.py` now parses.
    - Make existing platform expectations match documented hook exec form.
    - Add the machine-readable security manifest and parser tests first.
 2. **Build trusted state foundation**
@@ -204,7 +216,7 @@ Task generation must preserve this order: later stages depend on trusted manifes
 | FR-007 | Alternate-user executor plus Windows Job Object supervisor and layered deadlines | Worker-token, nested-job, grandchild delayed-marker/PID survivor tests |
 | FR-008 | Managed-only Orbit handlers, restricted client, verified plugins/skills/MCP | HKLM/remote/lower-source/project/plugin/skill/MCP tamper matrix |
 | FR-009 | Policy-helper, relay, live-init, SessionStart receipts and independent source watchers | Install/change/repair/session-start/source-mutation ordering scenarios |
-| FR-010 | Closed blocker codes plus leak-warning codes; redacted action/hint | Blocked and advisory non-technical message reviews |
+| FR-010 | Closed blocker/leak-warning codes; messages restricted to the FR-010 allowlist (boundary code, recovery action ID + instruction, non-secret reason, employee/run ID) | Blocked and advisory non-technical message reviews |
 | FR-011 | Workspace excluded; shell runs under dedicated clean-HKCU identity | Taint-source, file, owner-registry, policy-key, and workspace mutation matrix |
 | FR-012 | Cache APIs removed from authorization path | Preexisting/raced/symlinked cache tests |
 | FR-013 | Strict owner security subtree includes tools, gateways, connectors/MCP, explicit denies plus catalogs | Grant/deny removal injection and typed owner-write tests |
@@ -302,4 +314,4 @@ N/A: no project constitution exists. Feature-level gates remain satisfied after 
 | Tier-3 host prep is confused with Orbit's BaseContainer requirement | Install/verify host-prep as a companion, but require `base-container` and no DACL augmentation; never run prep as a substitute for missing proxy capability |
 | Legacy updater merges before new quiescing code can run | Secure-line versions compare equal under old `_key()` and are external-bootstrap only; exact legacy comparator is a release test |
 | Candidate signs its own evidence or another workflow publishes | Trust root is pinned by Microsoft Store bootstrap/prior release; TPM RSA runner keys plus offline Ed25519 aggregate key; exact protected workflow alone owns publication credential |
-| Existing shared test module is syntactically invalid | Baseline repair is first delivery step and release evidence is invalid until all suites parse |
+| Existing shared test module is syntactically invalid | Retired: marker removed in `b310ae7`; remaining baseline work is platform-expectation alignment before evidence is trusted |

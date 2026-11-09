@@ -23,7 +23,7 @@
 6. Gateway matching is raw `fnmatch` over shell text and returns no decision. Production receives bare catalog names while its test substitutes a wildcard. Fixing only that mismatch would turn command composition into a host escape.
 7. MXC discovery accepts `PATH`, missing metadata, same-major schemas, generic signatures, and a no-request probe. Final proxy-bearing requests are not schema validated.
 8. No persisted readiness result gates `engine.run()`, service scheduling, interactive sessions, updates, or gateway classification.
-9. `tests/test_platforms.py` contains a committed `=======` marker at line 1408, so the current cross-platform evidence cannot run.
+9. `tests/test_platforms.py` contained a committed `=======` marker; it was removed in `b310ae7` and the module now parses. The remaining baseline task is aligning platform expectations with the documented hook exec form before cross-platform evidence is trusted.
 10. Feature 001's optional real-host validation rule is incompatible with FR-033 and FR-034.
 
 ## R1 — Isolate the real Claude client instead of trusting workspace settings
@@ -235,7 +235,7 @@ The only publication job lives in `.github/workflows/windows-containment-release
 
 **Decision**: New hook, gateway, readiness, installer, broker, managed-policy, relay, worker, and pinned-dependency behavior executes only when `osinfo.KIND == "windows"` and owner mode is `mxc`. Shared tool files may gain native-only resolution branches, but existing POSIX/WSL PATH/runtime-install and command behavior remains byte/behavior-equivalent outside that exact branch. Native Windows recorded as `wsl2` exposes no native employee execution surface. macOS, Linux, and actual WSL2 retain existing sandbox, `failIfUnavailable`, gateways, settings, service, and tool dependency behavior.
 
-Repair the syntax-broken platform test before using regression results. Add byte/structure regression tests around non-Windows command/settings generation and per-tool dependency/launcher behavior, then run existing suites unchanged.
+The syntax-broken platform test was repaired in `b310ae7`. Add byte/structure regression tests around non-Windows command/settings generation and per-tool dependency/launcher behavior, then run existing suites unchanged.
 
 **Rationale**: FR-035 forbids sharing native host exceptions with WSL2 or changing established non-Windows behavior.
 

@@ -117,14 +117,14 @@ An owner cannot enter native MXC mode with an unsupported or unverified dependen
 
 - **FR-001**: In native Windows MXC mode, every shell-capable tool call MUST receive exactly one terminal disposition before execution: contained, approved as a canonical gateway call, or denied. A new or renamed shell tool that is not covered by the verified hook contract MUST remain unavailable.
 - **FR-002**: Orbit's Claude Code command-hook configuration MUST set `onFailure: "block"` on every containment-critical handler. Leaving the field unset or setting it to continue is forbidden.
-- **FR-003**: Orbit MUST require a Claude Code release that supports blocking command-hook failures and MUST verify effective behavior before accepting employee work. Version text alone is insufficient if effective settings disable or exclude the hook.
+- **FR-003**: Orbit MUST require a Claude Code release that supports blocking command-hook failures and MUST verify effective behavior before accepting employee work. Version text alone is insufficient if effective settings disable or exclude the hook. FR-003 is the release-admission gate; FR-009 defines the per-session attestation that repeats this proof for every run.
 - **FR-004**: A missing handler, spawn error, non-zero exit, crash, timeout, empty output, malformed output, invalid decision, or incompatible event payload MUST block the triggering shell action.
 - **FR-005**: A matched shell event MUST NOT use a successful empty response as "no decision." Missing or invalid required input MUST produce an explicit denial.
 - **FR-006**: If request construction, trusted-policy loading, helper launch, proxy launch, executor launch, or contained execution setup fails, Orbit MUST NOT execute or retry the original command on the host.
-- **FR-007**: Hook and workload deadlines MUST terminate their child process trees. A timeout MUST leave no hook, helper, proxy, executor, or workload process running.
+- **FR-007**: Hook and workload deadlines MUST terminate their child process trees. A timeout MUST leave no hook, helper, proxy, executor, or workload process running. Cleanup failure or survivor uncertainty is a structural blocker and is never advisory (see FR-030).
 - **FR-008**: Only Orbit-owned, release-verified handlers MAY execute as host-side hooks in employee sessions. Employee-writable settings, skills, plugins, or other content MUST NOT add, replace, disable, or influence host-side handlers.
 - **FR-009**: Every employee session MUST establish that its effective client configuration registered the containment hook before any shell-capable tool becomes available. Orbit MUST repeat the full proof that the hook rewrites a normal command and blocks a synthetic failure and timeout after install, upgrade, Claude Code change, effective-policy change, or containment repair.
-- **FR-010**: Hook denial and readiness messages MUST identify the failed boundary and one recovery action without exposing commands, secrets, credentials, unrestricted paths, or policy contents beyond what support needs.
+- **FR-010**: Hook denial and readiness messages MUST identify the failed boundary and one recovery action without exposing commands, secrets, credentials, unrestricted paths, or policy contents. A message MAY contain only a release-owned boundary code, one release-owned recovery action ID with its owner-facing instruction, a non-secret reason code, and an employee/run identifier needed for support; every other value is redacted.
 
 #### Trusted Policy Boundary
 
