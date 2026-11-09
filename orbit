@@ -112,18 +112,10 @@ def ensure_home():
 
 # ------------------------------------------------------------------ checks
 def claude_status():
-    c = engine.resolve_claude()
-    if not shutil.which(c) and not os.path.exists(c):
-        return False, "Claude Code isn't installed. Install it from https://claude.com/claude-code, then run `claude` once to sign in."
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_")) and k != "CLAUDECODE"}
-    r = subprocess.run([c, "auth", "status"], capture_output=True, text=True, env=env)
-    try:
-        d = json.loads(r.stdout)
-    except ValueError:
-        d = {}
-    if not d.get("loggedIn"):
-        return False, "Claude Code isn't signed in. Run `claude auth login` and sign in with your own Claude account."
-    return True, "Claude Code signed in (%s)" % d.get("authMethod", "ok")
+    """L01: the shared version-only installation check. The account is Claude's business; a broken
+    configured connection only surfaces at the first real Claude run (FR-001–FR-004)."""
+    a = engine.claude_availability()
+    return a["state"] == "available", a["detail"]
 
 
 def checks():
@@ -973,7 +965,7 @@ def main():
                 say("One more thing so the service can listen: pip3 install --user websocket-client")
         if args.name == "anthropic":
             reg = engine.registry()
-            reg["auth"] = "api_key" if yes("Use this API key instead of your Claude subscription? (billed to your Anthropic account)", False) else "subscription"
+            reg["auth"] = "api_key" if yes("Use this API key instead of the connection Claude Code already uses? (billed to your Anthropic account)", False) else "subscription"
             engine.save_registry(reg, "auth: %s" % reg["auth"])
         say("Saved. `orbit restart` to apply.")
         return

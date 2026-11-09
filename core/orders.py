@@ -77,7 +77,7 @@ def execute(by, kind, p):
                 import rolebook
                 rolebook.apply_template(new, re.sub(r"[^a-z0-9-]", "", str(p["template"]))[:40])
             import cloud
-            if p.get("cloud", True) and not cloud.available():   # the service sets up their cloud desk
+            if p.get("cloud", True) and cloud.account_status(fresh=True)["eligible"]:   # the service sets up their cloud desk
                 reg = engine.registry()
                 reg["employees"][new]["cloud_shift"] = True
                 engine.save_registry(reg, "cloud shift on for new hire %s" % new)

@@ -103,8 +103,9 @@ Step "3/4" "Python packages for the page reader, the browser, the chat channels 
 & $PYTHON -m playwright install chromium
 
 Step "4/4" "Next steps (in this window)…"
-Write-Host "   1. Claude Code, if the crew's brain isn't on this PC yet: git clone or download from"
-Write-Host "      https://claude.com/claude-code, then run  claude auth login  with your own account."
+Write-Host "   1. Claude Code, if the crew's brain isn't on this PC yet: install it from"
+Write-Host "      https://claude.com/claude-code, then run this script again. Sign-in is Claude's own"
+Write-Host "      business (use the connection you already have)."
 Write-Host "   2. Set up the team:  & `"$PYTHON`" `"$KIT\orbit`" setup"
 Write-Host "      (checks, your business, your chat bot, your first hire)."
 Write-Host ""

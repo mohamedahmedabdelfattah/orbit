@@ -9,7 +9,8 @@ Build your team. Assign missions. Get things done.
 each crew shell command contained; WSL2 remains available as an explicit fallback.
 
 Add your first AI crew member in two minutes and watch it do a real piece of your work. It runs on
-your own computer (a Mac, a Windows PC or Linux), on the Claude plan you already have (no API bill), and it can't spend, post or message
+your own computer (a Mac, a Windows PC or Linux), using the Claude Code connection you already have
+configured (no separate API bill from Orbit), and it can't spend, post or message
 anyone but you. Early: built in the open, tested by a few people; tell us what breaks.
 
 **Who it's for:** founders who can't hire yet, freelancers with clients, product and design leads
@@ -38,9 +39,11 @@ the work you give them are **missions**; **Launch** starts one.
 ## Get started
 
 **You need:** a Mac, a Windows PC (Windows 11 24H2 with current updates or newer; older or unsupported
-Windows builds follow the WSL fallback below) or a Linux PC, and a paid Claude plan (Pro or Max).
-That's what your employees run on; nothing else is billed. Every feature works on all three; the few
-setup differences are below.
+Windows builds follow the WSL fallback below) or a Linux PC, and a working Claude Code installation.
+Claude Code can use the connection you already configured — your own Claude plan, an organization
+setup, or another supported configuration. Orbit only checks that the client is installed and runs;
+it never signs you in and doesn't require account sign-in for ordinary work. Nothing else is billed.
+Every feature works on all three; the few setup differences are below.
 
 **The easy way, no Terminal.** Open the Claude app on your computer, go to **Code**, and paste:
 
@@ -80,8 +83,11 @@ the same one Claude Code uses on Linux.
 
 1. Turn WSL on, once: click Start, type **PowerShell**, right-click it, **Run as administrator**, and run
    `wsl --install`. Restart when it asks. An **Ubuntu** window opens: pick a username and password.
-2. In the Ubuntu window, install Claude Code and sign in with your Claude account:
-   `curl -fsSL https://claude.ai/install.sh | bash`, then `claude auth login`.
+2. In the Ubuntu window, install Claude Code:
+   `curl -fsSL https://claude.ai/install.sh | bash`, then check `claude --version`. Use the Claude
+   connection you already have configured; Orbit doesn't sign you in. For unattended routines, make
+   sure that configuration persists for the background service (Claude's own persistent sign-in or
+   user/managed settings, not a one-off shell export).
 3. Still in Ubuntu, get Orbit and its system packages (it asks the password you just picked):
    `git clone https://github.com/BasemTarekkamal/orbit ~/orbit && sudo sh ~/orbit/setup-linux.sh`
 4. Then `~/orbit/install.sh`. Mission Control opens in your Windows browser, and the crew starts
@@ -146,13 +152,17 @@ and claim comes with a source link.
 - **Your computer first, then the cloud, so they don't stop when the lid closes:**
   1. **Your computer.** The crew runs here, on your hardware. Orbit keeps it awake while plugged in and during any
      job (Settings → Keep awake; closing a laptop's lid can still put it to sleep).
-  2. **Anthropic's cloud, on your Claude plan (Cloud shift, on for new hires).** Each crew member gets a cloud desk: a
+  2. **Anthropic's cloud, with a qualifying Claude account (Cloud Shift, on for new hires).** Cloud
+     Shift is optional and separate from ordinary work: it needs a Claude account eligible for cloud
+     sessions, checked fresh before each cloud launch, and shows its own account status in Settings.
+     If the account isn't eligible, only cloud launches are blocked; work on this computer continues.
+     Each crew member gets a cloud desk: a
      session seeded with their know-how, no GitHub needed. Shortly before each check time (an hour after the standup, the
      initiative and the end of day), your computer tells the cloud "skip this one, I'm here". If it can't, because it's
      closed or offline, the shift starts by itself and the crew member works there, with a report to your phone, day
      after day. When your computer is back, their cloud work comes home and they merge it. The cloud has no access to
      your Chrome or accounts, so posting and uploads wait for your computer. It costs a few thousand tokens a day when
-     your computer is on; a real shift when it's away counts like any other run on your plan.
+     your computer is on; a real shift when it's away counts like any other run under your Claude configuration.
   3. **Your own GitHub, only if you want it (Settings → Extra computing).** A private repository you make, for heavy
      jobs on your free GitHub Actions minutes. Nothing depends on it.
   Anything your computer missed while it was away, the crew makes up for in one run when it's back.
@@ -254,14 +264,21 @@ An autonomous agent that reads the open web needs locks, not promises. Every run
 
 ## What it costs
 
-- **Claude:** employees run on your own Claude subscription through the official, unmodified
-  Claude Code, each signed in through Anthropic's own login on your computer. Nothing is billed per run;
-  runs use your plan's limits, which you share with your own Claude use. The panel shows use in
+- **Claude:** employees run through the official, unmodified Claude Code, using the connection you
+  already configured there — your own Claude plan, an organization setup, or another supported
+  configuration. Orbit does not require account sign-in for ordinary work and never sees or stores
+  those credentials. Billing follows your own agreement with Claude's provider; Orbit does not bill
+  per run. For unattended routines and messages, keep that connection available to the background
+  service — Claude's own persistent sign-in or user/managed settings, or the OS service environment,
+  not a temporary shell export. The panel shows use in
   tokens, never dollars: each crew member's tokens this week against the weekly budget you gave them,
-  and your plan's 5-hour and weekly limits. Over budget, routines wait and they still answer you. When usage is high,
+  and your plan's 5-hour and weekly limits when Claude reports them. Over budget, routines wait and
+  they still answer you. When usage is high,
   employees switch to a lighter model on their own. A busy team uses a lot, so start with one or two
-  employees on Sonnet or Haiku. You can also use your own API key (`orbit secret anthropic`), billed
-  to your Anthropic account.
+  employees on Sonnet or Haiku. You can also use your own Anthropic API key
+  (`orbit secret anthropic`), billed to your Anthropic account.
+- **Cloud Shift is separate and optional:** it needs a qualifying Claude account eligible for cloud
+  sessions, and it is checked fresh before each cloud launch. It does not change ordinary local work.
 - **Apify** (optional, paid per use; the free plan includes monthly credit): only when you add a
   token, and never beyond the budget you set.
 - **Everything else is free and local**, including voice transcription (whisper.cpp) and OCR
@@ -282,10 +299,11 @@ orbit group <chat id> [--channel telegram|slack|discord]   the team chat
 
 ## Requirements
 
-- **Mac:** macOS, [Claude Code](https://claude.com/claude-code) signed in with your Claude account, and
+- **Mac:** macOS, [Claude Code](https://claude.com/claude-code) installed and configured with the
+  connection you use (account sign-in is one supported configuration, not an Orbit requirement), and
   Python 3.9 or newer (the one macOS ships is fine). Optional: Homebrew for voice notes (`ffmpeg`, `whisper-cpp`).
 - **Windows (native, primary):** Windows 11 24H2 with current updates or newer, [Claude Code](https://claude.com/claude-code)
-  signed in with your Claude account, and Python 3 (`setup-windows.ps1` installs the MXC sandbox runtime,
+  installed and configured with the connection you use, and Python 3 (`setup-windows.ps1` installs the MXC sandbox runtime,
   the tools and the Python packages). Optional: `winget install Gyan.FFmpeg` and `orbit doctor --get-whisper`
   for voice; Python's `soundcard` for live calls.
 - **Windows (fallback, through WSL):** Windows 10 (2004 or newer) or 11 with WSL 2 and Ubuntu
@@ -293,6 +311,7 @@ orbit group <chat id> [--channel telegram|slack|discord]   the team chat
 - **Linux:** Ubuntu 22.04+, Debian 12+ or Fedora, Claude Code, and `setup-linux.sh` (bubblewrap, socat,
   ffmpeg, tesseract, a compiler). Voice notes: `orbit doctor --get-whisper --get-voice-model`.
 - Everywhere, optional: a bot on Telegram, Slack or Discord ([docs/channels.md](docs/channels.md)), an Apify token.
+  Cloud Shift, if you use it, separately needs a qualifying Claude account eligible for cloud sessions.
 
 ## How it fits together
 
@@ -319,10 +338,22 @@ More: [docs/toolbelt.md](docs/toolbelt.md) (every tool and skill), [docs/channel
 
 ## Terms
 
-This kit runs Anthropic's unmodified Claude Code. Each user signs in with their own Claude account
-through Claude Code's own login; the kit never sees, stores or shares that login. If you choose
-API-key mode, your own key stays in `~/Staff/.secrets` on your computer. Usage is billed to you under your
-own agreement with Anthropic. Orbit's use of Microsoft Execution Containers on Windows doesn't turn on
+This kit runs Anthropic's unmodified Claude Code. Claude owns its connection: it may use your own
+Claude account, an organization configuration, or another supported setup, and account sign-in is one
+supported configuration rather than an Orbit prerequisite. Orbit never sees, stores or shares those
+credentials. If you choose API-key mode, your own key stays in `~/Staff/.secrets` on your computer.
+
+Ordinary work passes the background service's complete inherited environment through to Claude —
+Claude/provider values and any unrelated values present, including secrets — and loads your Claude
+user and project settings, including hooks and plugins. Those customizations are trusted and may
+execute; Orbit does not review, sandbox or vouch for them, and adds no credential isolation beyond
+Claude's own behavior. Orbit does not promise which endpoint Claude uses, whether inference stays
+on-device, whether Claude falls back, which models are compatible, or that credentials stay hidden
+from processes Claude itself launches. Cloud Shift, when enabled, requires its own qualifying Claude
+account and is checked separately before every cloud launch.
+
+Usage is billed to you under your own agreement with Claude's provider. Orbit's use of Microsoft
+Execution Containers on Windows doesn't turn on
 any Microsoft telemetry for you; whatever the runtime itself reports is Microsoft's own defaults. It's an independent
 project, not made or endorsed by Anthropic or Microsoft. Respect the terms of the sites you research, and
 people's privacy.

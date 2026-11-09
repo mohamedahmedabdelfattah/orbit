@@ -47,7 +47,7 @@ fi
 if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ] && [ ! -x "$HOME/.claude/local/claude" ]; then
   echo "Claude Code is missing. Install it with Anthropic's installer:"
   echo "  curl -fsSL https://claude.ai/install.sh | bash"
-  echo "then run 'claude auth login' to sign in with your own Claude account, and run this again."; exit 1
+  echo "then run this again. (Sign-in is Claude's own business: use the connection you already have.)"; exit 1
 fi
 
 echo "1/4  Python packages for the page reader, the browser, documents and chat (your user only)…"
