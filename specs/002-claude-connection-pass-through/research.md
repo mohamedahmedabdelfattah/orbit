@@ -84,30 +84,97 @@ Cloud Shift may retain a separate Anthropic/account-specific check because it is
 
 - Panel and checklist show Claude installed/available, not signed in/out.
 - Generic auth/network/rate errors refer to "Claude's configured connection."
-- Raw safe detail remains in existing run logs.
+- Existing process classification and Claude-provided output/error handling remain unchanged.
+- Orbit-generated registry data, run metadata, activity records, files, and UI responses never copy values from inherited connection environment or settings.
 - No message claims which provider was used, whether inference stayed local, or whether Claude can fall back.
 
-This is deliberate loss of provider-specific advice. Specific diagnosis belongs in Claude itself (`claude doctor`, `/status`, or a direct manual run).
+**Rationale**: This deliberately gives up provider-specific advice. Specific diagnosis belongs in Claude itself (`claude doctor`, `/status`, or a direct manual run). Separating Orbit-originated metadata from Claude output avoids both credential copying and an accidental promise that Orbit redacts arbitrary model/client output.
+
+**Alternatives considered**:
+
+- Redact every Claude output/error: changes existing logging semantics and cannot reliably identify secrets in arbitrary text.
+- Log inherited environment keys or values for support: violates the pass-through privacy boundary.
 
 ## D8 — Cloud Shift Is a Separate Account Contract
 
-**Decision**: `cloud.available()` performs a cached, account-only status check with provider variables and user setting sources excluded. Cloud Shift qualifies only for `loggedIn: true` with `authMethod: "claude.ai"`. `third_party`, `api_key`, `api_key_helper`, `oauth_token`, and `none` remain outside Orbit's supported Cloud Shift contract; ordinary local work is unaffected.
+**Decision**: Cloud Shift qualifies only for `loggedIn: true` with `authMethod: "claude.ai"`. `third_party`, `api_key`, `api_key_helper`, `oauth_token`, and `none` remain outside Orbit's supported Cloud Shift contract; ordinary local work is unaffected.
 
-Cloud Shift commands keep their current sanitized environment and empty setting sources. New-hire defaulting already calls `cloud.available()`; strengthening that function prevents accidental enablement.
+Read-only display may cache eligibility in memory for at most 60 seconds. Manual enablement, new-hire auto-enablement, and every Orbit-initiated Cloud Shift Claude command force a fresh account check. If an enabled shift loses eligibility, Orbit keeps its configured flag visible but blocks subsequent local cloud commands and records an account-only reason.
 
-## D9 — No New Data Model
+**Rationale**: A short display cache avoids repeated one-second status calls while rendering the panel. A cached result must never authorize a state change or launch. Keeping the enabled flag preserves owner intent and makes lost eligibility visible instead of silently rewriting configuration.
 
-No provider profile, endpoint, credential reference, readiness result, run binding, or migration is needed. Existing `staff.json.auth` stays for backward compatibility with Orbit's stored API key. Team and employee records are untouched.
+**Alternatives considered**:
+
+- Use the same cache for enablement and launches: stale positive status can cross the account-only boundary.
+- Disable the shift automatically after one failed check: destroys owner intent and obscures why work stopped.
+- Promise cancellation of already-scheduled remote work while Orbit is offline: Orbit cannot retroactively revoke an external schedule without a working account connection.
+
+## D9 — No New Persisted Data Model
+
+No persisted provider profile, endpoint, credential reference, readiness result, run binding, or migration is needed. Existing `staff.json.auth` stays for backward compatibility with Orbit's stored API key. Team and employee records are untouched. Transient launch classification, availability, eligibility, and diagnostic-provenance concepts are documented in [data-model.md](./data-model.md).
 
 ## D10 — Test Strategy
 
 - Fake Claude executable records argv, selected setting sources, and environment sentinels.
-- Setup test returns signed-out account status but successful version/print behavior.
-- Employee and onboarding tests assert exact setting-source and safety arguments.
+- One temporary Orbit installation completes setup, hiring, and an employee run while account status is signed out.
+- An enumerated source inventory covers every production Claude invocation; a regression assertion rejects unclassified direct launches.
+- Employee, onboarding, and guard-plugin paths assert exact environment, setting-source, and safety behavior.
 - Socket trap fails any `api.anthropic.com` probe while fake Claude succeeds.
-- Cloud tests cover account, third-party, API-key, and no-auth methods.
-- Existing legacy API-key, sandbox, guard, MCP, session, and platform suites remain regression gates.
-- Static copy checks reject global account-sign-in requirements outside the Cloud Shift boundary.
+- Cloud tests cover every known auth method, fresh-versus-cached checks, manual and automatic enablement, each cloud launch wrapper, and eligible-to-ineligible transitions.
+- Account isolation tests add an arbitrary future-provider sentinel and prove it is excluded without naming its prefix.
+- Existing legacy API-key tests assert both environment and employee/onboarding setting-source isolation.
+- Diagnostic tests use a non-echoing fake for Orbit-originated leak assertions and a separate marker-output case to prove Claude output handling is unchanged.
+- Static checks scan tracked production, setup, template, CI, and documentation files, allowing only exact account-only Cloud Shift wording.
+
+## D11 — Exhaustive Launch Classification
+
+**Decision**: Maintain the production invocation inventory in [contracts/claude-launch.md](./contracts/claude-launch.md). Every direct use of the resolved Claude executable in `orbit` or `core/` must correspond to one named inventory entry and one of five behavioral classes: installation check, ordinary pass-through, legacy API-key, interactive application, or Cloud Shift.
+
+All employee chats, routines, summaries, role processing, scheduled follow-ups, and similar work converge through `engine.run()`/`engine.stream()` and therefore share the employee launch policy. Structured hiring uses `onboard._ask()`. Guard plugin administration is a separate non-inference invocation. Cloud Shift has five direct command families in `core/cloud.py`.
+
+**Rationale**: Testing representative calls is not evidence for “100%.” An explicit inventory plus a source-level regression assertion makes a newly added bypass visible before implementation ships.
+
+**Alternatives considered**:
+
+- Rely only on the shared helper: a future direct `subprocess` call can bypass it silently.
+- Search for the text `claude`: produces many documentation/UI false positives and misses resolved executable variables.
+- Add a provider/inference wrapper module: unnecessary; the inventory classifies process launches without making Orbit own inference.
+
+## D12 — Cloud Account Environment Allowlist
+
+**Decision**: Build the Cloud Shift account environment from an empty mapping plus a documented platform bootstrap allowlist. Force the default owner home/profile used by Claude's native credentials, a known executable search path, and platform temporary directories. Copy only basic locale and OS process-bootstrap values. Set controlled `TERM` only for the interactive cloud-session bootstrap. Omit every unlisted variable, including `CLAUDECODE`, `CLAUDE_CONFIG_DIR`, provider/endpoint/token/API-key variables, proxy variables, and unknown future connection variables. Cloud inference commands explicitly use empty setting sources.
+
+The contract lists the allowed POSIX/macOS and Windows keys. Account status uses the same environment; `auth status` does not create a model session or load a user setting source.
+
+**Rationale**: Prefix subtraction can never prove absence of future provider variables. Official authentication documentation places the default login in the macOS Keychain or the default home/profile credential file, while `CLAUDE_CONFIG_DIR` selects a different credential/config set. A minimal allowlist therefore retains executable resolution, the default owner home/profile, temporary files, locale, and Windows process bootstrap without inheriting unrelated session variables.
+
+**Alternatives considered**:
+
+- Keep the current `ANTHROPIC_`/`CLAUDE_CODE_` denylist: misses unrelated or future provider names.
+- Use a completely empty environment: can break shebang resolution, owner-home account state, temporary files, Windows process startup, and native credential stores.
+- Reuse ordinary pass-through then clear selected values: violates isolation by default.
+
+## D13 — Repository-Wide Copy and Configuration Checks
+
+**Decision**: Validate all tracked production, setup, template, CI, and user-documentation files. Exclude historical feature artifacts and deliberate test fixtures. Treat account-login wording as valid only at exact allowlisted Cloud Shift messages. Also inventory hard-coded Anthropic host checks, provider-variable filtering, and direct Claude executable calls.
+
+**Rationale**: A hand-picked path list cannot satisfy a repository-wide success criterion and allows stale installer/template copy to survive.
+
+**Alternatives considered**:
+
+- Search only currently planned files: misses future and less-visible owner surfaces.
+- Ban every login phrase globally: rejects tests and legitimate account-only Cloud Shift guidance.
+
+## D14 — Supported Validation Platforms
+
+**Decision**: Use the repository's existing CI matrix: macOS, Ubuntu 24.04, native Windows unit coverage, and Ubuntu 24.04 under WSL2. Feature tests use fake Claude and no provider credentials on every job. Native Windows MXC runtime validation remains governed by feature 001 and is not added here.
+
+**Rationale**: This names the actual automated platform contract instead of leaving “supported CI platforms” undefined.
+
+**Alternatives considered**:
+
+- Require local execution on every operating system: not reproducible for one implementation session.
+- Add live Claude/provider checks to CI: consumes credentials/resources and contradicts the fake-only test boundary.
 
 ## Primary Sources
 

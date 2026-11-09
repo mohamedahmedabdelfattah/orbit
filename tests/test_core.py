@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -18,11 +19,14 @@ os.environ["STAFFROOM_HOME"] = TMP
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(KIT, "core"))
 sys.path.insert(0, os.path.join(KIT, "core", "tools"))
+sys.path.insert(0, os.path.join(KIT, "tests"))
 
 import abilities  # noqa: E402
 import engine  # noqa: E402
+import fake_claude  # noqa: E402
 import hire  # noqa: E402
 import orders  # noqa: E402
+import osinfo  # noqa: E402
 import team  # noqa: E402
 
 RUNS = []                                  # employee runs the code asked for; tests never start Claude
@@ -156,7 +160,7 @@ class Engine(unittest.TestCase):
         self.assertIn(os.path.join(TMP, "employees", "omar"), sb["filesystem"]["denyRead"])   # colleagues' folders
         self.assertIn(engine.SECRETS, sb["filesystem"]["denyRead"])
         self.assertIn("--strict-mcp-config", cmd)
-        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project")
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "user,project")   # pass-through mode: the owner's user+project sources
         dirs = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--plugin-dir"]
         self.assertEqual(dirs[0], engine.GUARD)
         self.assertTrue(dirs[1].startswith(os.path.join(TMP, ".runtime", "tess")))
@@ -165,21 +169,494 @@ class Engine(unittest.TestCase):
         self.assertIn("Bash(git push *)", denied)
         self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
 
-    def test_clean_env_never_leaks_api_settings(self):
-        os.environ["ANTHROPIC_BASE_URL"] = "http://localhost:4000"
-        os.environ["ANTHROPIC_API_KEY"] = "sk-not-for-employees"
-        try:
-            env = engine.clean_env(engine.employee("tess"))
-        finally:
-            del os.environ["ANTHROPIC_BASE_URL"], os.environ["ANTHROPIC_API_KEY"]
-        self.assertFalse([k for k in env if k.startswith("ANTHROPIC_")])
-        self.assertEqual(env["STAFF_EMPLOYEE"], "tess")
-        self.assertIn("fetch", env["STAFF_ABILITIES"].split(","))
-        self.assertTrue(env["PATH"].startswith(engine.BIN + ":"))
 
-    def test_friendly_errors(self):
-        self.assertIn("usage limit", engine.friendly_error("Claude AI usage limit reached"))
-        self.assertIn("claude auth login", engine.friendly_error("OAuth token has expired; please log in"))
+SENTINEL_ENV = {"CLAUDECODE": "1", "ANTHROPIC_BASE_URL": "http://inherited:4000",
+                "ANTHROPIC_API_KEY": "sk-inherited-not-orbits", "FUTURE_PROVIDER_TOKEN": "sentinel-future"}
+
+# The .bat shim cannot carry the real employee argv through cmd.exe's quote reparse; these
+# run-through-engine tests are CI coverage for the macOS, Linux and WSL2 jobs.
+POSIX_FAKE_RUN = unittest.skipIf(
+    osinfo.KIND == "windows",
+    "fake .bat shim vs. cmd.exe quoting: the full run matrix runs in the CI POSIX jobs")
+
+
+class ProviderNeutralRun(unittest.TestCase):
+    """T017 (FR-013, FR-014, FR-016, SC-003): ordinary work never probes or waits for
+    `api.anthropic.com` before invoking Claude, starts the fake immediately, keeps only the
+    resume/new-session safeguards, and never routes work anywhere else."""
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex", picked=["fetch"])
+        self.real = engine.resolve_claude
+
+    def tearDown(self):
+        engine.resolve_claude = self.real
+
+    def fake(self, **cfg):
+        self.dir = tempfile.mkdtemp(prefix="fake-claude-")
+        engine.resolve_claude = lambda: fake_claude.install(self.dir, **cfg)
+
+    @POSIX_FAKE_RUN
+    def test_no_api_probe_and_no_wait_before_work(self):
+        import socket
+        import time
+        self.fake(prompt={"result": "Done."})
+        probes = []
+        real_conn = socket.create_connection
+        socket.create_connection = lambda *a, **k: probes.append(a) or (_ for _ in ()).throw(
+            OSError("socket access blocked"))
+        try:
+            t0 = time.time()
+            out = engine.run(engine.employee("tess"), "Write the brief.")
+            elapsed = time.time() - t0
+        finally:
+            socket.create_connection = real_conn
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(probes, [])                       # no reachability probe of the provider endpoint
+        self.assertFalse(hasattr(engine, "online"))        # the process-wide reachability gate is gone
+        self.assertFalse(hasattr(engine, "wait_online"))
+        self.assertLess(elapsed, 60)
+        recs = fake_claude.calls(self.dir)
+        self.assertEqual(len(recs), 1)                     # Claude started immediately, exactly once
+        self.assertEqual(out["model"], "sonnet")           # the same provider/model Orbit chose
+
+    @POSIX_FAKE_RUN
+    def test_resume_then_new_session_retry_is_unchanged(self):
+        self.fake(prompt={"result": "first"})
+        emp = engine.employee("tess")
+        out = engine.run(emp, "one", session_key="room:1")
+        self.assertTrue(out["ok"], out)
+        fake_claude.configure(self.dir, prompt={"result": "second", "fail_resume": "resume unavailable"})
+        out2 = engine.run(emp, "two", session_key="room:1")
+        self.assertTrue(out2["ok"], out2)
+        recs = fake_claude.calls(self.dir)
+        self.assertEqual(len(recs), 3)
+        self.assertIn("--resume", recs[1]["argv"])         # the saved session was tried first...
+        self.assertTrue("--session-id" in recs[2]["argv"]) # ...and a fresh session followed, same provider
+        sid = recs[2]["argv"][recs[2]["argv"].index("--session-id") + 1]
+        with open(os.path.join(emp["workspace"], "state", "sessions.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["room:1"], sid)
+
+
+class Diagnostics(unittest.TestCase):
+    """T018 (FR-015, FR-016, FR-020, SC-009): every real Claude failure class keeps its own process
+    result and classification while owner-facing wording stays provider-neutral — no generic
+    account-login prescription, no guessed provider details."""
+
+    CASES = {
+        "rate-limit": "Claude AI usage limit reached. Please try again later.",
+        "authentication": "OAuth token has expired; please log in again.",
+        "connection": "connection refused while contacting the API",
+        "network": "getaddrinfo ENOTFOUND api.anthropic.com",
+        "provider": "API Error 500: upstream provider failed",
+        "unknown": "kaboom",
+    }
+
+    def test_owner_wording_is_provider_neutral_for_every_failure_class(self):
+        for name, err in self.CASES.items():
+            for text in (engine.friendly_error(err), engine.why_failed(err)):
+                low = text.lower()
+                for banned in ("auth login", "log in", "login", "sign in", "anthropic", "api key",
+                               "subscription", "api.anthropic.com"):
+                    self.assertNotIn(banned, low, "%s wording: %r" % (name, text))
+                self.assertTrue(text.strip(), name)
+
+    def test_failure_classes_keep_their_distinct_plain_reason(self):
+        self.assertIn("usage limit", engine.friendly_error(self.CASES["rate-limit"]))
+        self.assertIn("usage limit", engine.why_failed(self.CASES["rate-limit"]))
+        self.assertIn("authenticate", engine.friendly_error(self.CASES["authentication"]).lower())
+        self.assertIn("authenticate", engine.why_failed(self.CASES["authentication"]).lower())
+        self.assertIn("reach claude", engine.friendly_error(self.CASES["network"]).lower())
+        self.assertIn("offline", engine.why_failed(self.CASES["network"]).lower())
+        self.assertIn("asleep", engine.friendly_error(self.CASES["connection"]).lower())
+        self.assertIn("ran out of time", engine.why_failed("request timed out"))
+
+
+class DiagnosticProvenance(unittest.TestCase):
+    """T018 run-level: the fake's actual error text survives into the run result untouched, the
+    transient classification keeps driving retries, and no inherited sentinel is copied into any
+    Orbit-persisted record — even on the failure path (FR-015, FR-020)."""
+
+    BAN = ("sentinel-future", "sk-inherited-not-orbits", "http://inherited:4000", "CLAUDECODE")
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex")
+        self.real = engine.resolve_claude
+        self.saved = {k: os.environ.get(k) for k in SENTINEL_ENV}
+        os.environ.update(SENTINEL_ENV)
+
+    def tearDown(self):
+        engine.resolve_claude = self.real
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def fake(self, **cfg):
+        self.dir = tempfile.mkdtemp(prefix="fake-claude-")
+        engine.resolve_claude = lambda: fake_claude.install(self.dir, **cfg)
+
+    @POSIX_FAKE_RUN
+    def test_actual_result_and_transient_classification_are_preserved(self):
+        emp = engine.employee("tess")
+        for err, transient in (("getaddrinfo ENOTFOUND", True),
+                               ("Claude AI usage limit reached", True),
+                               ("OAuth token has expired", False),
+                               ("API Error 500: upstream provider failed", False),
+                               ("kaboom", False)):
+            self.fake(prompt={"error": err})
+            out = engine.run(emp, "Do it.")
+            self.assertFalse(out["ok"], err)
+            self.assertEqual(out["error"], err)            # the process result is the source of truth
+            self.assertEqual(out["transient"], transient, err)
+            self.assertEqual(len(fake_claude.calls(self.dir)), 1)   # one provider, no fallback routing
+
+    @POSIX_FAKE_RUN
+    def test_failed_run_persists_no_inherited_sentinel(self):
+        self.fake(prompt={"error": "ENOTFOUND api.anthropic.com"})
+        emp = engine.employee("tess")
+        out = engine.run(emp, "Do it.")
+        self.assertFalse(out["ok"])
+        rec = json.loads(open(os.path.join(emp["workspace"], "state", "runs.jsonl"),
+                              encoding="utf-8").read().strip().splitlines()[-1])
+        self.assertEqual(rec["error"], "ENOTFOUND api.anthropic.com")   # Claude's own text, unchanged
+        self.assertNotIn("env", rec)
+        for root, _, files in os.walk(engine.HOME):
+            for f in files:
+                p = os.path.join(root, f)
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                for b in self.BAN:
+                    self.assertNotIn(b, text, "leaked into %s" % p)
+
+
+class LaunchPolicy(unittest.TestCase):
+    """The ordinary pass-through versus legacy stored-key seam (T002; FR-005, FR-007, FR-012).
+    Ordinary mode starts from the whole inherited environment, removes only CLAUDECODE, applies
+    exactly the enumerated Orbit-owned overrides, and preserves arbitrary unknown sentinels.
+    Legacy mode strips conflicting routing/auth values, injects only the stored Orbit key for
+    inference, and keeps the isolated employee/onboarding setting sources."""
+    SENTINELS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "FUTURE_PROVIDER_TOKEN")
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex")
+        self.saved = {k: os.environ.get(k) for k in self.SENTINELS}
+        os.environ["CLAUDECODE"] = "1"
+        os.environ["ANTHROPIC_BASE_URL"] = "http://inherited:4000"
+        os.environ["ANTHROPIC_API_KEY"] = "sk-inherited-not-orbits"
+        os.environ["FUTURE_PROVIDER_TOKEN"] = "sentinel-future"
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        os.environ.pop("CLAUDECODE", None)
+
+    def legacy(self):
+        reg = engine.registry()
+        reg["auth"] = "api_key"
+        engine.save_registry(reg)
+        engine.save_secret("anthropic_api_key", "sk-stored-orbit")
+
+    def test_ordinary_employee_passes_through(self):
+        pol = engine.launch_policy("employee", engine.employee("tess"))
+        self.assertEqual(pol["mode"], "ordinary")
+        self.assertEqual(pol["setting_sources"], "user,project")
+        self.assertNotIn("CLAUDECODE", pol["env"])
+        self.assertEqual(pol["env"]["ANTHROPIC_BASE_URL"], "http://inherited:4000")      # the connection, preserved
+        self.assertEqual(pol["env"]["ANTHROPIC_API_KEY"], "sk-inherited-not-orbits")
+        self.assertEqual(pol["env"]["FUTURE_PROVIDER_TOKEN"], "sentinel-future")        # unknown future names pass through
+        self.assertEqual(pol["env"]["HOME"], engine.H)
+        self.assertTrue(pol["env"]["PATH"].startswith(engine.BIN + os.pathsep))
+        self.assertEqual(pol["env"]["CLAUDE_CODE_FORK_SUBAGENT"], "0")
+        if osinfo.KIND == "windows":
+            self.assertEqual(pol["env"]["CLAUDE_CODE_USE_POWERSHELL_TOOL"], "1")
+        self.assertEqual(pol["env"]["STAFF_EMPLOYEE"], "tess")                          # enumerated overrides win
+        self.assertIn("fetch", pol["env"]["STAFF_ABILITIES"].split(","))
+        self.assertEqual(pol["env"]["STAFFROOM_HOME"], engine.HOME)
+        self.assertEqual(pol["env"]["STAFFROOM_KIT"], engine.KIT)
+
+    def test_ordinary_onboarding_and_plugin_have_no_overlays(self):
+        pol = engine.launch_policy("onboarding")
+        self.assertEqual((pol["mode"], pol["setting_sources"]), ("ordinary", "user"))
+        self.assertNotIn("STAFF_EMPLOYEE", pol["env"])
+        self.assertNotIn("CLAUDECODE", pol["env"])
+        self.assertEqual(pol["env"]["FUTURE_PROVIDER_TOKEN"], "sentinel-future")
+        self.assertEqual(pol["env"]["ANTHROPIC_API_KEY"], "sk-inherited-not-orbits")   # inherited value preserved; Orbit injects nothing
+        pol = engine.launch_policy("plugin")
+        self.assertEqual((pol["mode"], pol["setting_sources"]), ("ordinary", None))
+        self.assertNotIn("STAFF_EMPLOYEE", pol["env"])
+
+    def test_ordinary_command_argv_selects_user_sources(self):
+        reg = engine.registry()
+        self.assertNotEqual(reg.get("auth"), "api_key")        # the fresh team is a pass-through install
+        cmd = engine.command(engine.employee("tess"), "sonnet")
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "user,project")
+
+    def test_legacy_employee_is_isolated(self):
+        self.legacy()
+        pol = engine.launch_policy("employee", engine.employee("tess"))
+        self.assertEqual(pol["mode"], "legacy")
+        self.assertEqual(pol["setting_sources"], "project")
+        self.assertNotIn("CLAUDECODE", pol["env"])
+        self.assertNotIn("ANTHROPIC_BASE_URL", pol["env"])     # routing stripped (existing legacy behavior)
+        self.assertEqual(pol["env"]["FUTURE_PROVIDER_TOKEN"], "sentinel-future")   # only provider prefixes strip; unknown names pass
+        self.assertEqual(pol["env"]["ANTHROPIC_API_KEY"], "sk-stored-orbit")
+        self.assertEqual(pol["env"]["STAFF_EMPLOYEE"], "tess")
+        cmd = engine.command(engine.employee("tess"), "sonnet")
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project")
+
+    def test_legacy_onboarding_keeps_isolated_source_and_key(self):
+        self.legacy()
+        pol = engine.launch_policy("onboarding")
+        self.assertEqual((pol["mode"], pol["setting_sources"]), ("legacy", ""))
+        self.assertEqual(pol["env"]["ANTHROPIC_API_KEY"], "sk-stored-orbit")
+        self.assertNotIn("ANTHROPIC_BASE_URL", pol["env"])
+
+    def test_legacy_plugin_administration_never_sees_the_stored_key(self):
+        self.legacy()
+        pol = engine.launch_policy("plugin")
+        self.assertNotIn("ANTHROPIC_API_KEY", pol["env"])
+        self.assertNotIn("ANTHROPIC_BASE_URL", pol["env"])
+        self.assertIsNone(pol["setting_sources"])
+
+
+class EmployeeLaunch(unittest.TestCase):
+    """T010/T013 (FR-005–FR-011, FR-010, FR-020, SC-002, SC-004): a genuine engine.run() through
+    the fake Claude executable proves the whole launch surface — argv, environment snapshot,
+    workspace, prompt and session handling — and that nothing of the provider connection or the
+    inherited environment reaches anything Orbit persists."""
+
+    PROMPT = "Write a one-line morning brief."
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex", picked=["web", "fetch", "browser"],
+                  domains=["api.example.com"])
+        self.real = engine.resolve_claude
+        self.saved = {k: os.environ.get(k) for k in SENTINEL_ENV}
+
+    def tearDown(self):
+        engine.resolve_claude = self.real
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def fake(self, **cfg):
+        self.dir = tempfile.mkdtemp(prefix="fake-claude-")   # outside the Orbit home: the recorder
+        engine.resolve_claude = lambda: fake_claude.install(self.dir, **cfg)  # writes sentinels by design
+
+    def ordinary_run(self, **run_kw):
+        self.fake(prompt={"result": "Morning brief: one strong line."})
+        os.environ.update(SENTINEL_ENV)
+        emp = engine.employee("tess")
+        return emp, engine.run(emp, self.PROMPT, **run_kw)
+
+    @POSIX_FAKE_RUN
+    def test_ordinary_employee_run_end_to_end(self):
+        emp, out = self.ordinary_run()
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["text"], "Morning brief: one strong line.")
+        recs = fake_claude.calls(self.dir)
+        self.assertEqual(len(recs), 1)
+        c = recs[0]
+        self.assertEqual(c["cwd"], emp["workspace"])
+        self.assertEqual(c["stdin"], self.PROMPT)
+        argv = c["argv"]
+        self.assertEqual(argv[0], "-p")
+        self.assertNotIn("--resume", argv)                 # a fresh chat starts a new session
+        self.assertTrue(argv[argv.index("--session-id") + 1])
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertEqual(argv[argv.index("--effort") + 1], "medium")
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "user,project")
+        self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertIn(engine.GUARD, argv)                  # the guard plugin still rides along
+        self.assertTrue(any(a.startswith(os.path.join(TMP, ".runtime", "tess")) for a in argv))
+        cmd = engine.command(emp, "sonnet")                # unchanged sandbox/lock controls (deterministic)
+        s = json.loads(cmd[cmd.index("--settings") + 1])
+        self.assertTrue(s["sandbox"]["enabled"])
+        self.assertIn("api.example.com", s["sandbox"]["network"]["allowedDomains"])
+        env = c["env"]
+        self.assertNotIn("CLAUDECODE", env)
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://inherited:4000")   # the connection, inherited
+        self.assertEqual(env["FUTURE_PROVIDER_TOKEN"], "sentinel-future")      # unknown future names pass
+        self.assertNotEqual(env.get("ANTHROPIC_API_KEY"), "sk-stored-orbit")   # no Orbit-stored key exists
+        self.assertEqual(env["HOME"], engine.H)
+        self.assertTrue(env["PATH"].startswith(engine.BIN + os.pathsep))
+        self.assertEqual(env["CLAUDE_CODE_FORK_SUBAGENT"], "0")
+        self.assertEqual(env["STAFF_EMPLOYEE"], "tess")
+        self.assertEqual(env["STAFF_WORKSPACE"], emp["workspace"])
+        self.assertEqual(env["STAFFROOM_HOME"], engine.HOME)
+        self.assertEqual(env["STAFFROOM_KIT"], engine.KIT)
+        self.assertIn("fetch", env["STAFF_ABILITIES"].split(","))
+        if osinfo.KIND == "windows":
+            self.assertEqual(env["CLAUDE_CODE_USE_POWERSHELL_TOOL"], "1")
+
+    @POSIX_FAKE_RUN
+    def test_chat_resumes_one_session_per_person(self):
+        emp, out = self.ordinary_run(session_key="room:1")
+        self.assertTrue(out["ok"], out)
+        out2 = engine.run(emp, "Continue.", session_key="room:1")
+        self.assertTrue(out2["ok"], out2)
+        recs = fake_claude.calls(self.dir)
+        self.assertEqual(len(recs), 2)
+        self.assertNotIn("--resume", recs[0]["argv"])      # first chat: new session...
+        self.assertIn("--resume", recs[1]["argv"])         # ...then every later message resumes it
+
+    @POSIX_FAKE_RUN
+    def test_legacy_employee_run_is_unchanged(self):
+        reg = engine.registry()
+        reg["auth"] = "api_key"
+        engine.save_registry(reg)
+        engine.save_secret("anthropic_api_key", "sk-stored-orbit")
+        self.ordinary_run()
+        c = fake_claude.calls(self.dir)[0]
+        argv, env = c["argv"], c["env"]
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)        # legacy isolation: routing values stripped
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-stored-orbit")   # the stored key, inference only
+        self.assertEqual(env["FUTURE_PROVIDER_TOKEN"], "sentinel-future")   # provider-prefixed values only strip
+        self.assertEqual(env["STAFF_EMPLOYEE"], "tess")
+
+    @POSIX_FAKE_RUN
+    def test_persistence_boundary(self):
+        emp, out = self.ordinary_run(session_key="room:1")
+        self.assertTrue(out["ok"], out)
+        ban = ("sentinel-future", "sk-inherited-not-orbits", "http://inherited:4000", "CLAUDECODE")
+        reg = json.load(open(engine.REGISTRY, encoding="utf-8"))
+        self.assertEqual(reg.get("auth"), "subscription")  # nothing re-binds the install to a provider
+        self.assertFalse([k for k in reg if any(t in k for t in ("provider", "endpoint", "credential",
+                                                                 "discovery", "readiness"))])
+        rec = json.loads(open(os.path.join(emp["workspace"], "state", "runs.jsonl"),
+                              encoding="utf-8").read().strip().splitlines()[-1])
+        self.assertEqual((rec["employee"], rec["job"]), ("tess", "chat"))
+        self.assertNotIn("env", rec)                       # no environment snapshot in run records
+        self.assertFalse([k for k in rec if any(t in k for t in ("provider", "endpoint", "credential",
+                                                                 "discovery", "readiness"))])
+        with open(os.path.join(emp["workspace"], "state", "sessions.json"), encoding="utf-8") as fh:
+            sess = json.load(fh)
+        self.assertIn("room:1", sess)                      # the only run binding: an Orbit-made session id
+        for root, _, files in os.walk(engine.HOME):        # sweeping the whole install folder
+            for f in files:
+                p = os.path.join(root, f)
+                with open(p, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                for b in ban:
+                    self.assertNotIn(b, text, "leaked into %s" % p)
+
+
+class HireAndPluginLaunch(unittest.TestCase):
+    """T011 (FR-006–FR-009, FR-012, SC-002, SC-005): structured onboarding and guard-plugin
+    administration at the fake executable's argv/env level — pass-through with the declared
+    controls, no unlisted overlays, and never the stored inference key."""
+
+    STRUCTURED = {"intro": "Two quick ones.",
+                  "questions": [{"type": "choice", "q": "Daily brief tone?", "options": ["Casual", "Formal"]}],
+                  "name": "Sam", "role": "Market researcher",
+                  "scope": "Find market numbers the owner can use.",
+                  "abilities": ["memory"], "routines": {}, "access": [], "budget": "regular",
+                  "description": "Research support", "first_task": "Check example.com",
+                  "plan": "Look at numbers", "model": "sonnet"}
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex")
+        self.reals = engine.resolve_claude
+        self.saved = {k: os.environ.get(k) for k in SENTINEL_ENV}
+
+    def tearDown(self):
+        engine.resolve_claude = self.reals
+        for k, v in self.saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def fake(self, **cfg):
+        self.dir = tempfile.mkdtemp(prefix="fake-claude-")   # outside the Orbit home (the recorder
+        engine.resolve_claude = lambda: fake_claude.install(self.dir, **cfg)  # writes sentinels by design)
+
+    def test_structured_onboarding_uses_user_source_and_no_tools(self):
+        import onboard
+        self.fake(prompt={"structured": self.STRUCTURED, "result": "answers ready"})
+        os.environ.update(SENTINEL_ENV)
+        q = onboard.questions("Market researcher", "Find market numbers", name="Sam")
+        self.assertEqual(q["intro"], "Two quick ones.")
+        self.assertEqual([x["id"] for x in q["questions"]], ["q1"])   # Orbit normalizes the card
+        card = onboard.compose("Market researcher", "Find market numbers", "Sam",
+                               answers=[{"q": "Tone?", "a": "Casual"}])
+        self.assertEqual(card["budget"], "regular")
+        self.assertEqual(card["abilities"], ["memory"])
+        recs = fake_claude.calls(self.dir)
+        self.assertEqual(len(recs), 2)
+        for c in recs:
+            argv, env = c["argv"], c["env"]
+            self.assertEqual(c["cwd"], engine.HOME)
+            self.assertEqual(argv[0], "-p")
+            self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+            self.assertEqual(argv[argv.index("--effort") + 1], "low")
+            self.assertEqual(argv[argv.index("--tools") + 1], "")
+            self.assertEqual(argv[argv.index("--setting-sources") + 1], "user")
+            self.assertEqual(argv[argv.index("--output-format") + 1], "json")
+            self.assertIn("--no-session-persistence", argv)
+            self.assertIn("--strict-mcp-config", argv)
+            if osinfo.KIND != "windows":                   # cmd.exe %* quoting garbles the JSON tail
+                self.assertIn("--json-schema", argv)       # on Windows .bat shims: recorded Windows quirk
+            self.assertNotIn("CLAUDECODE", env)
+            self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://inherited:4000")
+            self.assertEqual(env["FUTURE_PROVIDER_TOKEN"], "sentinel-future")
+            for k in ("STAFF_EMPLOYEE", "STAFF_WORKSPACE", "STAFFROOM_KIT", "STAFF_ABILITIES",
+                      "STAFF_BROWSER_SITES", "CLAUDE_CODE_FORK_SUBAGENT"):
+                self.assertNotIn(k, env)                   # onboarding gets no employee overlays
+            self.assertNotEqual(env.get("ANTHROPIC_API_KEY"), "sk-stored-orbit")
+
+    def test_plugin_administration_is_pass_through_without_overlays_or_keys(self):
+        self.fake()                                        # plugin answer: already installed
+        os.environ.update(SENTINEL_ENV)
+        s = engine.claude_session("tess")
+        self.assertIn("folder", s)
+        recs = fake_claude.calls(self.dir)
+        self.assertEqual(len(recs), 2)                     # marketplace add, then plugin install
+        ws = engine.employee("tess")["workspace"]
+        for c in recs:
+            argv, env = c["argv"], c["env"]
+            self.assertEqual(argv[0], "plugin")
+            self.assertNotIn("--setting-sources", argv)    # administration declares no setting sources
+            self.assertNotIn("CLAUDECODE", env)
+            self.assertEqual(c["cwd"], ws)                 # scoped to this folder only
+            self.assertEqual(env["FUTURE_PROVIDER_TOKEN"], "sentinel-future")
+            self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://inherited:4000")   # plain pass-through
+            for k in ("STAFF_EMPLOYEE", "STAFF_WORKSPACE", "STAFFROOM_KIT", "STAFF_ABILITIES",
+                      "CLAUDE_CODE_FORK_SUBAGENT"):
+                self.assertNotIn(k, env)                   # no unlisted overlays for administration
+            self.assertNotEqual(env.get("ANTHROPIC_API_KEY"), "sk-stored-orbit")   # no Orbit key, ever
+        stamp = os.path.join(ws, ".claude", "orbit-guard.version")
+        with open(os.path.join(engine.GUARD, ".claude-plugin", "plugin.json"), encoding="utf-8") as fh, \
+                open(stamp, encoding="utf-8") as out:
+            self.assertEqual(out.read().strip(), json.load(fh)["version"])   # the install actually stamped
+
+    def test_legacy_plugin_administration_stays_key_free(self):
+        reg = engine.registry()
+        reg["auth"] = "api_key"
+        engine.save_registry(reg)
+        engine.save_secret("anthropic_api_key", "sk-stored-orbit")
+        self.fake()
+        os.environ.update(SENTINEL_ENV)
+        engine.claude_session("tess")
+        for c in fake_claude.calls(self.dir):
+            env = c["env"]
+            self.assertNotIn("ANTHROPIC_API_KEY", env)     # legacy administration never sees the stored key
+            self.assertNotIn("ANTHROPIC_BASE_URL", env)    # ...nor any legacy-isolated routing value
+            self.assertEqual(c["argv"][0], "plugin")       # fixed operation/workspace behavior untouched
 
 
 class Panel(unittest.TestCase):
@@ -220,6 +697,27 @@ class Panel(unittest.TestCase):
 
     def auth(self, extra=None):
         return {"Cookie": "sr%d=%s" % (self.panel.port(), self.tok), **(extra or {})}
+
+    def test_claude_checklist_and_settings_are_provider_neutral(self):
+        """FR-003/FR-004: readiness describes the installation, never account sign-in."""
+        import panel
+        cache, real = panel._availability, engine.claude_availability
+        panel._availability = {"at": 0.0, "value": None}
+        engine.claude_availability = lambda: {"state": "missing",
+                                              "detail": "Install Claude Code from https://claude.com/claude-code."}
+        try:
+            st = json.loads(self.req("/api/state", headers=self.auth())[2])
+            item = next(c for c in st["checklist"] if c["id"] == "claude")
+            self.assertFalse(item["done"])
+            blob = json.dumps(item).lower()
+            self.assertNotIn("sign in", blob)
+            self.assertNotIn("sign in to", blob)
+            self.assertNotIn("auth login", blob)
+            s = json.loads(self.req("/api/settings", headers=self.auth())[2])
+            self.assertEqual(s["claude"]["state"], "missing")
+            self.assertEqual(s["claude"]["detail"], "Install Claude Code from https://claude.com/claude-code.")
+        finally:
+            panel._availability, engine.claude_availability = cache, real
 
     def test_needs_the_token(self):
         self.assertEqual(self.req("/")[0], 401)
@@ -437,12 +935,9 @@ class LiveSteps(unittest.TestCase):
         hire.hire("Tess", "Research", supervisor="Alex")
         self.emp = engine.employee("tess")
         self.real = engine.resolve_claude
-        self.real_online = engine.online
-        engine.online = lambda *a, **k: True               # the fake claude needs no internet
 
     def tearDown(self):
         engine.resolve_claude = self.real
-        engine.online = self.real_online
 
     def fake(self, sleep=0):
         p = os.path.join(TMP, "fake-claude")
@@ -647,6 +1142,261 @@ class Skills(unittest.TestCase):
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):
         return None
+
+
+class CloudShiftPanel(unittest.TestCase):
+    """T027 (FR-017–FR-019, SC-006): the panel shows account eligibility as display-only state,
+    failures stay account-only, and installation readiness never depends on the account."""
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex")
+        import cloud
+        import panel
+        self.cloud, self.panel, self.orders = cloud, panel, orders
+        self.real_status, self.real_resolve = cloud.account_status, engine.resolve_claude
+        self.real_avail = dict(panel._availability)
+        engine.resolve_claude = lambda: sys.executable          # a real, runnable client for L01
+        panel._availability = {"at": 0.0, "value": None}
+        self.account = {}
+
+    def tearDown(self):
+        self.cloud.account_status, engine.resolve_claude = self.real_status, self.real_resolve
+        self.panel._availability = self.real_avail
+
+    def account_is(self, eligible=False, method="oauth_token",
+                   reason="The cloud shift needs a Claude plan sign-in on this computer."):
+        self.account = {"checked_at": 1234.5, "eligible": eligible,
+                        "auth_method": method, "reason": reason}
+        self.cloud.account_status = lambda fresh=False: dict(self.account)
+
+    def test_panel_shows_eligibility_without_making_installing_account_dependent(self):
+        self.account_is()
+        member = next(m for m in self.panel.members() if m["id"] == "tess")["cloud"]
+        self.assertFalse(member["on"])
+        self.assertFalse(member["eligible"])
+        self.assertFalse(member["blocked"])
+        self.assertEqual(member["why_not"], self.account["reason"])
+        self.assertEqual(member["auth_method"], "oauth_token")
+        self.assertEqual(member["checked_at"], 1234.5)
+        for view in (self.panel.state(), self.panel.settings_view()):
+            self.assertFalse(view["cloud_shift"]["eligible"])
+            self.assertEqual(view["cloud_shift"]["auth_method"], "oauth_token")
+            self.assertEqual(view["cloud_shift"]["why_not"], self.account["reason"])
+        self.assertEqual(engine.claude_availability()["state"], "available")   # installation only
+        self.assertEqual(self.panel.claude_available()["state"], "available")
+        low = self.account["reason"].lower()
+        self.assertNotIn("api key", low)
+        self.assertNotIn("anthropic", low)
+        with self.assertRaises(self.orders.OrderError) as ctx:
+            self.orders.execute("Alex", "set_cloud", {"employee_id": "tess", "on": True})
+        self.assertEqual(str(ctx.exception), self.account["reason"])
+        self.assertFalse(self.cloud.is_on("tess"))
+        before = set(engine.registry()["employees"])
+        self.orders.execute("Alex", "hire", {"name": "Nia", "role": "Writer", "first_day": False})
+        new = (set(engine.registry()["employees"]) - before).pop()
+        self.assertFalse(self.cloud.is_on(new))                # ordinary work is still hired
+
+    def test_enabled_but_ineligible_shows_blocked_and_turns_off_locally(self):
+        reg = engine.registry()
+        reg["employees"]["tess"]["cloud_shift"] = True
+        engine.save_registry(reg)
+        self.account_is()
+        member = next(m for m in self.panel.members() if m["id"] == "tess")["cloud"]
+        self.assertTrue(member["on"])
+        self.assertFalse(member["eligible"])
+        self.assertTrue(member["blocked"])                     # configured, but cloud launches are refused
+        self.assertTrue(member["why_not"])
+        self.orders.execute("Alex", "set_cloud", {"employee_id": "tess", "on": False})
+        self.assertFalse(self.cloud.is_on("tess"))             # the local switch always turns off
+        self.assertFalse(self.panel.state()["cloud_shift"]["eligible"])
+
+
+class LaunchInventory(unittest.TestCase):
+    """T038: every production launch of the resolved Claude executable maps to exactly one
+    inventoried class (L01–L11, contracts/claude-launch.md). A new direct launch with no
+    mapping fails here instead of quietly bypassing the launch contract (FR-007, SC-002)."""
+    CONTRACT = os.path.join(KIT, "specs", "002-claude-connection-pass-through", "contracts", "claude-launch.md")
+
+    # (file, top-level function) -> inventory ID. L02 executes command()'s argv through the shared
+    # run()/stream() seam, so the argv builder stands in for it; L05 is the app link (no CLI child),
+    # and L06 is the account-only eligibility check behind every Cloud Shift launch.
+    MAPPED = {
+        ("core/engine.py", "claude_availability"): "L01",
+        ("core/engine.py", "command"): "L02",
+        ("core/engine.py", "claude_session"): "L04",
+        ("core/onboard.py", "_ask"): "L03",
+        ("core/cloud.py", "account_status"): "L06",
+        ("core/cloud.py", "trigger"): "L07",
+        ("core/cloud.py", "send"): "L08",
+        ("core/cloud.py", "environment"): "L09",
+        ("core/cloud.py", "new_session"): "L10",
+        ("core/cloud.py", "_transcript"): "L11",
+    }
+    SITE = re.compile(r"(?:=\s*\(?(?:engine\.)?resolve_claude\(\)|\[(?:engine\.)?resolve_claude\(\),"
+                      r"|(?:,\s*|\()\s*(?:engine\.)?resolve_claude\(\)"
+                      r"|subprocess\.\w+\(\s*\[?(?:engine\.)?resolve_claude)")
+
+    def production_files(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        y = [("orbit", os.path.join(root, "orbit"))]
+        for name in sorted(os.listdir(os.path.join(root, "core"))):
+            if name.endswith(".py") and name != "osinfo.py":
+                y.append(("core/%s" % name, os.path.join(root, "core", name)))
+        return y
+
+    def site_functions(self):
+        """{(file, function): line} for every launch-shaped use of resolve_claude()."""
+        found = {}
+        for rel, path in self.production_files():
+            fn = None
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if re.match(r"^def (\w+)\(", line):
+                        fn = line.split("def ", 1)[1].split("(", 1)[0].strip()
+                    elif self.SITE.search(line) and "dirname(resolve_claude" not in line and fn:
+                        found.setdefault((rel, fn), line.strip()[:80])
+        return found
+
+    def test_contract_inventories_every_class_exactly_once(self):
+        with open(self.CONTRACT, encoding="utf-8") as fh:
+            ids = re.findall(r"^\|\s*(L\d\d)\s*\|", fh.read(), re.M)
+        self.assertEqual(len(ids), len(set(ids)), "duplicate inventory rows")
+        self.assertEqual(sorted(ids), sorted("L%02d" % n for n in range(1, 12)))
+
+    def test_every_launch_site_is_inventoried(self):
+        stray = [(k, v) for k, v in self.site_functions().items() if k not in self.MAPPED]
+        self.assertEqual(stray, [])
+
+    def test_mapped_sites_exist_and_match_the_contract(self):
+        found = self.site_functions()
+        for site, launch_id in self.MAPPED.items():
+            self.assertIn(site, found, "%s:%s was expected to launch Claude" % site)
+        for site in found:
+            self.assertIn(site, self.MAPPED)
+        used_ids = sorted(self.MAPPED.values())
+        self.assertEqual(len(used_ids), len(set(used_ids)))       # a site maps to exactly one class
+
+
+class StaticContracts(unittest.TestCase):
+    """T032 (FR-007, FR-010, FR-013, FR-023, SC-002, SC-007, SC-008): tracked production, setup,
+    template and documentation files cannot quietly reintroduce an Anthropic-host preflight, ad hoc
+    provider filtering, a generic Claude sign-in prerequisite, or a provider integration surface.
+    Historical specifications, tests and the historical design note are out of scope (SC-007)."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    RUNTIME = re.compile(r"^(?:core/[^/]+\.py|core/panel/app\.js|orbit)$")
+    DOC_ROOTS = ("README.md", "SETUP.md", "install.sh", "setup-windows.ps1", "docs", "templates",
+                 ".github")
+    SKIP_DOCS = ("docs/superpowers/",)                       # historical design, excluded by SC-007
+    TEXT = (".md", ".sh", ".ps1", ".py", ".js", ".yml", ".yaml", ".json", ".txt")
+    PROVIDER_IMPORTS = re.compile(
+        r"^\s*(?:import|from)\s+(?:anthropic|openai|litellm|langchain|vertexai|boto3|botocore|"
+        r"google\.generativeai)\b", re.M)
+    ENDPOINT_FIELD = re.compile(r'"(?:base_url|api_base|api_endpoint|endpoint_url)"\s*[=:]')
+    AD_HOC_FILTER = re.compile(
+        r'startswith\(\s*\(?\s*"(?:ANTHROPIC_|CLAUDE_CODE_|CLAUDE_AGENT_SDK|BEDROCK|VERTEX|'
+        r'FOUNDRY|AWS_)')
+    GENERIC_SIGNIN = re.compile(
+        r"Claude Code isn't signed in|Signed in to Claude|claude auth login|paid Claude plan", re.I)
+    # The only functions allowed to mention account sign-in: Cloud Shift's own account-only block.
+    CLOUD_ACCOUNT_FUNCTIONS = {"account_status", "_account_env", "_require_cloud_account",
+                               "why_not", "enable", "disable", "status"}
+
+    def _production(self):
+        yield "orbit", os.path.join(self.ROOT, "orbit")
+        core = os.path.join(self.ROOT, "core")
+        for name in sorted(os.listdir(core)):
+            if name.endswith(".py"):
+                yield "core/" + name, os.path.join(core, name)
+
+    def _documented(self):
+        for name in ("README.md", "SETUP.md", "install.sh", "setup-windows.ps1"):
+            yield name, os.path.join(self.ROOT, name)
+        for root in ("docs", "templates", ".github"):
+            for dirpath, dirnames, filenames in os.walk(os.path.join(self.ROOT, root)):
+                dirnames[:] = sorted(d for d in dirnames if d not in ("__pycache__", "node_modules"))
+                for name in sorted(filenames):
+                    full = os.path.join(dirpath, name)
+                    rel = os.path.relpath(full, self.ROOT).replace(os.sep, "/")
+                    if rel.startswith(self.SKIP_DOCS) or not name.endswith(self.TEXT):
+                        continue
+                    yield rel, full
+
+    @staticmethod
+    def _lines(path):
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            yield from enumerate(fh, 1)
+
+    def _python_lines(self, path):
+        fn = None
+        for n, line in self._lines(path):
+            m = re.match(r"^def (\w+)\(", line)
+            if m:
+                fn = m.group(1)
+            yield n, fn, line
+
+    def test_anthropic_host_probe_is_the_cloud_tick_only(self):
+        hits = []
+        for rel, path in self._production():
+            for n, fn, line in self._python_lines(path):
+                if "api.anthropic.com" not in line:
+                    continue
+                if rel == "core/cloud.py" and fn == "_online":
+                    continue
+                hits.append("%s:%d: %s" % (rel, n, line.strip()))
+        self.assertEqual(hits, [], "ordinary work must never preflight an Anthropic host (FR-013)")
+
+    def test_provider_prefix_filtering_is_legacy_only(self):
+        hits = []
+        declarations = 0
+        for rel, path in self._production():
+            for n, fn, line in self._python_lines(path):
+                if line.lstrip().startswith("LEGACY_ENV_PREFIXES = ("):
+                    declarations += 1
+                    continue
+                if "LEGACY_ENV_PREFIXES" in line:
+                    if rel != "core/engine.py" or fn != "launch_policy" or "if legacy else" not in line:
+                        hits.append("%s:%d: %s" % (rel, n, line.strip()))
+                if self.AD_HOC_FILTER.search(line):
+                    hits.append("%s:%d: %s" % (rel, n, line.strip()))
+        self.assertEqual(declarations, 1, "provider prefixes belong to the one legacy compatibility seam")
+        self.assertEqual(hits, [], "ordinary pass-through must not filter by provider prefixes (FR-005)")
+
+    def test_generic_account_login_wording_is_cloud_shift_only(self):
+        hits = []
+        scanned = list(self._production()) + list(self._documented())
+        for rel, path in scanned:
+            for n, fn, line in self._python_lines(path) if path.endswith(".py") else (
+                    (n, None, line) for n, line in self._lines(path)):
+                if not self.GENERIC_SIGNIN.search(line):
+                    continue
+                if rel == "core/cloud.py" and fn in self.CLOUD_ACCOUNT_FUNCTIONS:
+                    continue
+                hits.append("%s:%d: %s" % (rel, n, line.strip()))
+        self.assertEqual(hits, [], "sign-in/account-login wording is account-only Cloud Shift guidance (FR-004)")
+
+    def test_no_provider_integration_surface_was_added(self):
+        self.assertEqual(sorted(p for p in os.listdir(self.ROOT)
+                                if p in ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py",
+                                         "package.json", "package-lock.json")), [])
+        hits = []
+        for rel, path in self._production():
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            if self.PROVIDER_IMPORTS.search(text):
+                hits.append(rel + ": provider/inference SDK import")
+            if self.ENDPOINT_FIELD.search(text):
+                hits.append(rel + ": endpoint configuration field")
+            name = os.path.basename(rel)
+            if re.search(r"provider|relay|inference|credential|migration", name, re.I):
+                hits.append(rel + ": provider-shaped module")
+        for dirpath, dirnames, filenames in os.walk(self.ROOT):
+            dirnames[:] = [d for d in dirnames if d not in (".git", "__pycache__", "node_modules")]
+            for name in dirnames + filenames:
+                if re.search(r"migration", name, re.I):
+                    hits.append(os.path.relpath(os.path.join(dirpath, name), self.ROOT).replace(os.sep, "/"))
+        self.assertEqual(hits, [], "no provider schema/module/endpoint/credential/relay/inference/migration (FR-010)")
 
 
 import urllib.parse  # noqa: E402

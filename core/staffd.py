@@ -320,15 +320,15 @@ def minutes(emp_id, info, who, title):
 
 # ------------------------------------------------------------------ routines, reminders, bus, skills
 def tick_jobs():
-    """Starts each routine when it's due, once this computer is really awake and online. Until then it stays due.
+    """Starts each routine when it's due, once this computer is really awake. Until then it stays due.
     A network failure runs it again 10 minutes later. Asleep past its 4-hour window, it's made up for: everything
-    missed goes into one catch-up run the moment the computer is back, with one report, not a line per routine."""
+    missed goes into one catch-up run the moment the computer is back, with one report, not a line per routine.
+    Nothing here probes the provider: due work starts, and Claude's own result decides what happened (FR-013)."""
     import awake
     if not awake.settled():
         return                                            # asleep, or one of its few-second wakes: a run would only freeze
     now = dt.datetime.now()
     stamp = now.strftime("%F %H:%M")
-    net = None
     for k, e in team.active().items():
         emp = engine.employee(k)
         st_f = os.path.join(emp["workspace"], "state", "schedule.json")
@@ -346,10 +346,6 @@ def tick_jobs():
                 st.pop("wait:" + job, None)
                 jsave(st_f, st)
                 continue
-            if net is None:
-                net = engine.online()
-            if not net:
-                continue                                  # stays due: tried again next minute
             st[job] = due.strftime("%F")
             st.pop("wait:" + job, None)
             jsave(st_f, st)
@@ -367,10 +363,6 @@ def tick_jobs():
             st["catchup"] = pending
             jsave(st_f, st)
         if pending and st.get("wait:catchup", "") <= stamp:
-            if net is None:
-                net = engine.online()
-            if not net:
-                continue
             st.pop("catchup", None)
             st.pop("wait:catchup", None)
             jsave(st_f, st)
@@ -392,23 +384,20 @@ def tick_jobs():
 
 
 def tick_reminders():
-    """A due reminder stays due while this computer is asleep or offline. A follow-up the crew member set itself
-    runs then; if the network still fails it runs again in 10 minutes. What it reports goes in the team room."""
+    """A due reminder stays due while this computer is asleep. A follow-up the crew member set itself
+    runs then; if the network still fails it runs again in 10 minutes. What it reports goes in the team room.
+    No reachability check gates this: due means delivered or run (FR-013)."""
     import awake
     import remind
     if not awake.settled():
         return
-    stamp, net = dt.datetime.now().strftime("%Y-%m-%d %H:%M"), None
+    stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     for k in team.active():
         if not abilities.has(k, "reminders"):
             continue
         emp = engine.employee(k)
         if not any(r.get("at", "9") <= stamp for r in remind.load(emp["workspace"])):
             continue
-        if net is None:
-            net = engine.online()
-        if not net:
-            return
         room = team.to_room(k, emp["name"], emp.get("supervisor", ""), "job")
         for r in remind.due(emp["workspace"]):
             targets = to_people(emp, r["to"]) if r["to"] != "me" else to_people(emp, "supervisor")

@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 import zipfile
+from types import SimpleNamespace
 
 TMP = tempfile.mkdtemp(prefix="orbit-platforms-test-")
 os.environ["STAFFROOM_HOME"] = TMP
@@ -24,7 +25,25 @@ import calls  # noqa: E402
 import engine  # noqa: E402
 import osinfo  # noqa: E402
 
+sys.path.insert(0, os.path.join(KIT, "tests"))
+import fake_claude  # noqa: E402
+
+_orbit_cli = None
 LISTEN = os.path.join(KIT, "core", "tools", "call_listen.py")
+
+
+def orbit_cli():
+    """orbit has no .py extension: load it by source path, exactly like the CI failure steps."""
+    global _orbit_cli
+    if _orbit_cli is None:
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("orbit_cli", os.path.join(KIT, "orbit"))
+        spec = importlib.util.spec_from_loader("orbit_cli", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        _orbit_cli = mod
+    return _orbit_cli
 
 # A stand-in for the soundcard package: a speaker that plays a tone, a microphone, and (with FAKE_SILENT=1)
 # a loopback that sends nothing, as a silent Windows loopback does.
@@ -816,7 +835,10 @@ Drift..Master earns money. In 90 days (by 2027-01-31):
         self.hire.upgrade_workspace(old)
         self.assertNotIn("review", abilities.jobs(old))
 
-    def test_offline_routines_wait_and_retry(self):
+    def test_a_due_routine_starts_without_reachability_and_retry_rearms(self):
+        """T019 (FR-013, FR-016): a due routine starts on its own schedule even when the provider is
+        unreachable — nothing probes reachability first — and a network failure still re-arms it ten
+        minutes later through the same provider."""
         import datetime as dt
         import staffd
         now = dt.datetime.now()
@@ -827,30 +849,24 @@ Drift..Master earns money. In 90 days (by 2027-01-31):
         reg["jobs"] = {"standup": {"at": (now - dt.timedelta(minutes=1)).strftime("%H:%M"), "days": "daily"}}
         engine.save_registry(reg)
         started = []
-        real_run, real_online = staffd.run_async, engine.online
+        real_run = staffd.run_async
         staffd.run_async = lambda *a, **k: started.append(k)
         try:
-            engine.online = lambda *a, **k: False
             staffd.tick_jobs()
-            self.assertEqual(started, [])                                  # offline: stays due
-            st_f = os.path.join(TMP, "employees", eid, "state", "schedule.json")
-            st = {}
-            if os.path.exists(st_f):
-                with open(st_f) as fh:
-                    st = json.load(fh)
-            self.assertNotIn("standup", st)
-            engine.online = lambda *a, **k: True
-            staffd.tick_jobs()
-            self.assertEqual(len(started), 1)                              # back online: it starts
-            started[0]["retry"]()                                          # …and fails on the network: again in 10 min
+            self.assertEqual(len(started), 1)                              # due is due, reachable or not
+            self.assertFalse(hasattr(engine, "online"))                    # nothing gates on reachability
+            st_f = os.path.join(engine.employee(eid)["workspace"], "state", "schedule.json")
+            started[0]["retry"]()                                          # it failed on the network: again in 10 min
             with open(st_f) as fh:
                 st = json.load(fh)
             self.assertNotIn("standup", st)
-            self.assertGreater(st["wait:standup"], now.strftime("%F %H:%M"))
+            retry_at = dt.datetime.strptime(st["wait:standup"], "%Y-%m-%d %H:%M")
+            self.assertGreaterEqual(retry_at, (now + dt.timedelta(minutes=9)).replace(second=0))
+            self.assertLessEqual(retry_at, dt.datetime.now() + dt.timedelta(minutes=11))
             staffd.tick_jobs()
             self.assertEqual(len(started), 1)                              # not before then
         finally:
-            staffd.run_async, engine.online = real_run, real_online
+            staffd.run_async = real_run
 
     def test_a_routine_that_works_is_posted(self):
         import threading
@@ -1002,7 +1018,8 @@ class Sharing(unittest.TestCase):
 
 class Asleep(unittest.TestCase):
     """A sleeping laptop: no run starts in its few-second wakes, a missed day is made up for in one run, a due
-    follow-up isn't lost, its report reaches the owner, and the computer stays up while a run is going."""
+    follow-up isn't lost, its report reaches the owner, and the computer stays up while a run is going. Nothing
+    here probes the provider's reachability: due work starts, and a failure is reported and retried (T019)."""
 
     def setUp(self):
         import hire
@@ -1013,17 +1030,17 @@ class Asleep(unittest.TestCase):
         import awake
         import staffd
         self.awake, self.staffd = awake, staffd
-        self.real = (staffd.run_async, engine.online, awake._since)
+        self.real = (staffd.run_async, awake._since)
         self.started = []
         staffd.run_async = lambda *a, **k: self.started.append((a, k))
-        engine.online = lambda *a, **k: True
         self.eid = hire.hire("Suoo", "Content creator", "Videos", supervisor="Alex", picked=["standup", "eod", "reminders"])
-        self.st_f = os.path.join(TMP, "employees", self.eid, "state", "schedule.json")
+        self.ws = engine.employee(self.eid)["workspace"]
+        self.st_f = os.path.join(self.ws, "state", "schedule.json")
         if os.path.exists(self.st_f):                                     # an earlier test's Suoo, same folder
             os.remove(self.st_f)
 
     def tearDown(self):
-        self.staffd.run_async, engine.online, self.awake._since = self.real
+        self.staffd.run_async, self.awake._since = self.real
 
     def write_schedule(self, st):
         os.makedirs(os.path.dirname(self.st_f), exist_ok=True)
@@ -1044,6 +1061,7 @@ class Asleep(unittest.TestCase):
         self.awake._since = time.time() - 120                             # really awake now
         self.staffd.tick_jobs()
         self.assertEqual(len(self.started), 1)
+        self.assertFalse(hasattr(engine, "online"))                       # no reachability check anywhere
 
     def test_a_missed_day_is_made_up_for_in_one_run(self):
         import datetime as dt
@@ -1083,21 +1101,26 @@ class Asleep(unittest.TestCase):
         self.staffd.tick_jobs()
         self.assertEqual(self.started, [])
 
-    def test_a_followup_waits_runs_reports_and_retries(self):
+    def test_a_due_followup_runs_reports_and_retries(self):
         import datetime as dt
         import osinfo
         sys.path.insert(0, os.path.join(KIT, "core", "tools"))
         import remind
         import team
-        ws = os.path.join(TMP, "employees", self.eid)
+        ws = self.ws
         past = (dt.datetime.now() - dt.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
-        remind.save(ws, [{"id": "R-0001", "at": past, "to": "me", "text": "Make the batch", "repeat": "daily", "agent": True}])
-        engine.online = lambda *a, **k: False
+        future = (dt.datetime.now() + dt.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+        remind.save(ws, [
+            {"id": "R-0001", "at": past, "to": "me", "text": "Make the batch", "repeat": "daily", "agent": True},
+            {"id": "R-0002", "at": future, "to": "me", "text": "Later", "repeat": "none", "agent": True},
+            {"id": "R-0003", "at": past, "to": "me", "text": "Stretch", "repeat": "none", "agent": False}])
         self.staffd.tick_reminders()
-        self.assertEqual(self.started, [])                                # offline: not consumed
-        self.assertEqual(remind.load(ws)[0]["at"], past)
-        engine.online = lambda *a, **k: True
-        self.staffd.tick_reminders()
+        self.assertEqual(len(self.started), 1)                            # the due follow-up runs, no reachability gate
+        self.assertFalse(hasattr(engine, "online"))                       # nothing probed the provider
+        self.assertTrue(any(r.get("body") == "Reminder: Stretch" for r in team.tail(team.FEED, 5)))
+        ids = [r["id"] for r in remind.load(ws)]
+        self.assertIn("R-0002", ids)                                      # not due yet: untouched
+        self.assertNotIn("R-0003", ids)                                   # plain reminder: delivered and consumed
         a, k = self.started[0]
         self.assertEqual(a[2], "followup")
         shown, real = [], osinfo.notify
@@ -1165,6 +1188,11 @@ class CloudShift(unittest.TestCase):
         engine.save_registry({"team_name": "Test", "owners": {"local-alex": {"name": "Alex", "local": True}}, "employees": {},
                               "defaults": {"model": "sonnet"}, "panel": {"port": 7392}, "workdays": ["Mon", "Tue", "Wed", "Thu", "Fri"],
                               "cloud_environment": "env_test"})
+        self.real_resolve = engine.resolve_claude
+        engine.resolve_claude = lambda: sys.executable        # a real file; the account check is faked below
+        self.real_status = cloud.account_status
+        self.acct = {"checked_at": 1.0, "eligible": True, "auth_method": "claude.ai", "reason": ""}
+        cloud.account_status = lambda fresh=False: dict(self.acct)
         self.eid = hire.hire("Cleo", "Researcher", "Coffee", supervisor="Alex")
         self.ws = os.path.join(TMP, "employees", self.eid)
         if os.path.exists(cloud._path(self.eid)):
@@ -1177,6 +1205,7 @@ class CloudShift(unittest.TestCase):
 
     def tearDown(self):
         self.cloud.trigger, self.cloud.send, self.cloud.new_session, self.cloud.pull = self.real
+        self.cloud.account_status, engine.resolve_claude = self.real_status, self.real_resolve
 
     def test_the_schedule_skips_only_today(self):
         import datetime as dt
@@ -1336,16 +1365,292 @@ class CloudShift(unittest.TestCase):
         orders.execute("Alex", "retire", {"employee_id": self.eid})
         self.assertTrue(all(c[2] == {"enabled": False} for c in self.calls) and self.calls)
 
-    def test_new_hires_get_it_and_an_api_key_cant(self):
+    def test_new_hires_get_it_only_with_a_qualifying_account(self):
         import orders
-        orders.execute("Alex", "hire", {"name": "Nia", "role": "Writer", "first_day": False})
-        self.assertTrue(self.cloud.is_on("nia"))
-        reg = engine.registry()
-        reg["auth"] = "api_key"
-        engine.save_registry(reg)
-        self.assertIn("API key", self.cloud.available())
-        with self.assertRaises(self.cloud.CloudError):
+        before = set(engine.registry()["employees"])
+        result = orders.execute("Alex", "hire", {"name": "Nia", "role": "Writer", "first_day": False})
+        self.assertIn("Hired", result)
+        first = (set(engine.registry()["employees"]) - before).pop()
+        self.assertTrue(self.cloud.is_on(first))
+        self.acct.update(eligible=False, auth_method="oauth_token",
+                         reason="The cloud shift needs a Claude plan sign-in on this computer.")
+        before = set(engine.registry()["employees"])
+        orders.execute("Alex", "hire", {"name": "Nia Two", "role": "Writer", "first_day": False})
+        second = (set(engine.registry()["employees"]) - before).pop()
+        self.assertFalse(self.cloud.is_on(second))
+        with self.assertRaises(self.cloud.CloudError) as ctx:
             self.cloud.enable(self.eid)
+        self.assertIn("sign-in", str(ctx.exception))
+
+
+class CloudAccount(unittest.TestCase):
+    """T023–T026 (FR-017–FR-019, SC-006): Cloud Shift is an account-only boundary. Eligibility is a
+    transient, memory-cached result; account launches get an empty-mapping allowlist; and every
+    Orbit-initiated cloud operation takes a fresh check. No real cloud or account here."""
+
+    AUTH_MATRIX = {"none": (False, "none"), "third_party": (True, "third_party"),
+                   "api_key": (True, "api_key"), "api_key_helper": (True, "api_key_helper"),
+                   "oauth_token": (True, "oauth_token")}
+
+    class FakeRun:
+        """Stands in for every `claude` subprocess: auth status, trigger, send and /schedule."""
+
+        def __init__(self):
+            self.calls = []
+            self.auth = {"loggedIn": True, "authMethod": "claude.ai"}
+
+        def __call__(self, cmd, **kw):
+            cmd = list(cmd)
+            self.calls.append((cmd, kw))
+            if cmd[1:3] == ["auth", "status"]:
+                return SimpleNamespace(stdout=json.dumps(self.auth), stderr="", returncode=0)
+            if "--cloud" in cmd:
+                return SimpleNamespace(stdout='{"ok": true}', stderr="", returncode=0)
+            if "/schedule" in (kw.get("input") or ""):
+                return SimpleNamespace(stdout="env_ABCDEFGHIJ", stderr="", returncode=0)
+            lines = [json.dumps({"type": "user", "message": {"content": [
+                        {"type": "tool_result", "content": 'HTTP 200 {"trigger": {"id": "trig_9"}}'}]}}),
+                     json.dumps({"type": "result", "usage": {"input_tokens": 3, "output_tokens": 2}})]
+            return SimpleNamespace(stdout="\n".join(lines), stderr="", returncode=0)
+
+    def setUp(self):
+        import cloud
+        import hire
+        self.cloud, self.hire = cloud, hire
+        os.makedirs(os.path.join(TMP, "team"), exist_ok=True)
+        engine.save_registry({"team_name": "Test", "owners": {"local-alex": {"name": "Alex", "local": True}}, "employees": {},
+                              "defaults": {"model": "sonnet"}, "panel": {"port": 7393},
+                              "workdays": ["Mon", "Tue", "Wed", "Thu", "Fri"]})
+        self.real_resolve = engine.resolve_claude
+        self.claude = os.path.join(TMP, "claude-account-exe")
+        with open(self.claude, "w") as fh:
+            fh.write("")
+        engine.resolve_claude = lambda: self.claude
+        self.eid = hire.hire("Ada", "Analyst", "Market", supervisor="Alex")
+        self.real_run, self.real_cache = cloud.subprocess.run, dict(cloud._CACHE)
+        self.fake = self.FakeRun()
+        cloud.subprocess.run = self.fake
+        self.real_setup = cloud.setup
+
+        def setup(emp_id):                                    # the desk build is other tests'; the schedule is this one's
+            st = cloud.state(emp_id)
+            st["slots"] = {"10:00": {"trigger": "t1"}}
+            cloud._save(emp_id, st)
+            return st
+        cloud.setup = setup
+        cloud._CACHE.update({"at": 0.0, "result": None})
+
+    def tearDown(self):
+        self.cloud.subprocess.run, self.cloud.setup = self.real_run, self.real_setup
+        engine.resolve_claude = self.real_resolve
+        self.cloud._CACHE.clear()
+        self.cloud._CACHE.update(self.real_cache)
+
+    def auth(self, logged_in=True, method="claude.ai"):
+        self.fake.auth = {"loggedIn": logged_in, "authMethod": method}
+        self.cloud._CACHE.update({"at": 0.0, "result": None})
+
+    def launches(self):
+        return [c for c in self.fake.calls if c[0][1:3] != ["auth", "status"]]
+
+    # -- T023
+    def test_eligibility_is_exactly_logged_in_claude_ai(self):
+        for method, (logged_in, auth_method) in self.AUTH_MATRIX.items():
+            self.fake.auth = {"loggedIn": logged_in, "authMethod": auth_method}
+            res = self.cloud.account_status(fresh=True)
+            self.assertFalse(res["eligible"], method)
+            self.assertEqual(res["auth_method"], auth_method)
+            self.assertTrue(res["reason"])
+            self.assertNotIn("anthropic", res["reason"].lower())
+            self.assertNotIn("api key", res["reason"].lower())
+        self.fake.auth = {"loggedIn": False, "authMethod": "claude.ai"}
+        self.assertFalse(self.cloud.account_status(fresh=True)["eligible"])   # a method without a login
+        self.fake.auth = {"loggedIn": True, "authMethod": "claude.ai"}
+        res = self.cloud.account_status(fresh=True)
+        self.assertTrue(res["eligible"])
+        self.assertEqual(res["auth_method"], "claude.ai")
+        self.assertEqual(res["reason"], "")                                  # empty only when eligible
+        self.assertIsInstance(res["checked_at"], float)
+
+    def test_read_cache_is_short_and_fresh_mode_bypasses_it(self):
+        first = self.cloud.account_status()
+        second = self.cloud.account_status()
+        self.assertEqual(len([c for c in self.fake.calls if c[0][1:3] == ["auth", "status"]]), 1)
+        self.assertGreaterEqual(second["checked_at"], first["checked_at"])
+        self.assertTrue(second["eligible"])
+        self.fake.auth = {"loggedIn": True, "authMethod": "third_party"}
+        self.assertTrue(self.cloud.account_status()["eligible"])              # a stale positive display cache
+        self.assertFalse(self.cloud.account_status(fresh=True)["eligible"])   # fresh bypasses it
+        self.assertEqual(len([c for c in self.fake.calls if c[0][1:3] == ["auth", "status"]]), 2)
+        self.assertFalse(self.cloud.account_status()["eligible"])             # the fresh result is now cached
+        self.cloud._CACHE["at"] -= 61                                        # older than 60 seconds
+        self.fake.auth = {"loggedIn": True, "authMethod": "claude.ai"}
+        self.assertTrue(self.cloud.account_status()["eligible"])              # re-checked after expiry
+
+    # -- T024
+    SENTINELS = {"CLAUDECODE": "1", "CLAUDE_CONFIG_DIR": "C:/inherited", "ANTHROPIC_BASE_URL": "http://inherited:4000",
+                 "ANTHROPIC_API_KEY": "sk-inherited-not-orbits", "HTTPS_PROXY": "http://proxy:8080",
+                 "FUTURE_PROVIDER_TOKEN": "sentinel-future"}
+
+    def test_account_environment_is_built_from_an_empty_mapping(self):
+        import tempfile
+        saved = {k: os.environ.get(k) for k in self.SENTINELS}
+        os.environ.update(self.SENTINELS)
+        try:
+            env = self.cloud._account_env(self.claude)
+            interactive = self.cloud._account_env(self.claude, interactive=True)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        for name in self.SENTINELS:
+            self.assertNotIn(name, env)
+        self.assertFalse([k for k in env if k.startswith(("ANTHROPIC_", "CLAUDE_"))])
+        self.assertEqual(env["HOME"], engine.H)
+        dirs = env["PATH"].split(os.pathsep)
+        self.assertIn(os.path.dirname(self.claude), dirs)
+        self.assertIn(engine.BIN, dirs)
+        self.assertIn(osinfo.path_dirs()[0], dirs)
+        if osinfo.KIND == "windows":
+            self.assertEqual(env["TEMP"], tempfile.gettempdir())
+            self.assertEqual(env["TMP"], tempfile.gettempdir())
+            self.assertEqual(env["USERPROFILE"], engine.H)
+            allowed = {"PATH", "HOME", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT",
+                       "WINDIR", "COMSPEC", "PATHEXT", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA"}
+        else:
+            self.assertEqual(env["TMPDIR"], tempfile.gettempdir())
+            allowed = {"PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE"}
+        self.assertLessEqual(set(env), allowed)
+        self.assertNotIn("TERM", env)
+        self.assertEqual(interactive["TERM"], "xterm-256color")               # session bootstrap only
+        self.assertEqual({k for k in interactive if k != "TERM"}, set(env))
+
+    # -- T025
+    def test_manual_enable_and_auto_enable_require_a_fresh_check(self):
+        import orders
+        self.assertTrue(self.cloud.account_status()["eligible"])              # prime a positive display cache
+        self.fake.auth = {"loggedIn": True, "authMethod": "api_key"}
+        with self.assertRaises(self.cloud.CloudError) as ctx:
+            self.cloud.enable(self.eid)
+        self.assertIn("sign-in", str(ctx.exception))
+        self.assertFalse(self.cloud.is_on(self.eid))
+        before = set(engine.registry()["employees"])
+        orders.execute("Alex", "hire", {"name": "Nia", "role": "Writer", "first_day": False})
+        new = (set(engine.registry()["employees"]) - before).pop()
+        self.assertFalse(self.cloud.is_on(new))                              # ordinary work is still hired
+
+    def test_eligibility_loss_keeps_the_switch_but_blocks_cloud_launches(self):
+        import panel
+        self.cloud.enable(self.eid)
+        self.assertTrue(self.cloud.is_on(self.eid))
+        self.cloud._save(self.eid, {"slots": {"10:00": {"trigger": "t1"}}})
+        self.auth(True, "oauth_token")
+        with self.assertRaises(self.cloud.CloudError):
+            self.cloud.trigger("update", "t1", {"enabled": False})            # a fresh launch is refused
+        st = self.cloud.status(self.eid)
+        self.assertTrue(st["on"])                                            # the flag stays configured
+        self.assertFalse(st["eligible"])
+        self.assertTrue(st["blocked"])
+        self.assertTrue(st["why_not"])
+        self.assertIn(self.eid, [m["id"] for m in panel.members()])           # local work still shows
+
+    def test_owner_disable_is_local_and_remote_cleanup_is_best_effort(self):
+        self.cloud.enable(self.eid)
+        self.cloud._save(self.eid, {"slots": {"10:00": {"trigger": "t1"}}})
+        self.auth(True, "third_party")
+        real, tried = self.cloud.trigger, []
+
+        def refuse(*a, **k):
+            tried.append(a)
+            raise self.cloud.CloudError("The cloud shift needs a Claude plan sign-in on this computer.")
+        self.cloud.trigger = refuse
+        try:
+            reply = self.cloud.disable(self.eid)                             # no positive eligibility needed
+        finally:
+            self.cloud.trigger = real
+        self.assertIn("off", reply)
+        self.assertFalse(self.cloud.is_on(self.eid))
+        self.assertEqual(len(tried), 1)                                       # cleanup was attempted, then skipped
+
+    # -- T026
+    def test_launch_helpers_take_a_fresh_check_and_the_account_environment(self):
+        made = self.cloud.trigger("create", body={"name": "x"})
+        self.assertEqual(made["trigger"]["id"], "trig_9")
+        self.assertEqual(len([c for c in self.fake.calls if c[0][1:3] == ["auth", "status"]]), 1)
+        cmd, kw = self.launches()[0]
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "")
+        self.assertIn("RemoteTrigger", cmd)
+        self.assertIn("--no-session-persistence", cmd)
+        self.assertEqual(kw["env"], self.cloud._account_env(self.claude))
+
+        self.fake.calls.clear()
+        self.cloud.send("session_1", "hello")
+        cmd, kw = self.launches()[0]
+        self.assertEqual(cmd[cmd.index("--cloud") + 1], "session_1")
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "")
+        self.assertEqual(kw["env"], self.cloud._account_env(self.claude))
+
+        self.fake.calls.clear()
+        self.assertEqual(self.cloud.environment(), "env_ABCDEFGHIJ")
+        cmd, kw = self.launches()[0]
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "")
+        self.assertEqual(kw["env"], self.cloud._account_env(self.claude))
+
+    def test_launch_helpers_bypass_a_stale_positive_cache(self):
+        self.assertTrue(self.cloud.account_status()["eligible"])
+        self.fake.auth = {"loggedIn": True, "authMethod": "third_party"}
+        self.cloud._save(self.eid, {"slots": {}})
+        for fn, args in ((self.cloud.trigger, ("list",)),
+                         (self.cloud.send, ("session_1", "hello")),
+                         (self.cloud.environment, ()),
+                         (self.cloud.new_session, (self.eid, TMP, "hi")),
+                         (self.cloud._transcript, (self.eid, "session_1"))):
+            with self.assertRaises(self.cloud.CloudError, msg=fn.__name__):
+                fn(*args)                                                     # every L07–L11 takes a fresh check
+
+    def test_transcript_launch_uses_the_account_environment(self):
+        import io
+        real_popen, real_expand = self.cloud.subprocess.Popen, self.cloud.os.path.expanduser
+        holder = {}
+
+        class P:
+            def __init__(self, cmd, **kw):
+                holder.update(cmd=list(cmd), kw=kw)
+                self.stdin = io.StringIO()
+                folder = os.path.join(os.path.expanduser("~/.claude/projects"),
+                                      re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(os.path.join(
+                                          engine.HOME, ".runtime", "ada", "cloud-pull"))))
+                os.makedirs(folder, exist_ok=True)
+                holder["path"] = os.path.join(folder, "new.jsonl")
+                with open(holder["path"], "w") as fh:
+                    fh.write("{}\n")
+
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        self.cloud.subprocess.Popen = P
+        self.cloud.os.path.expanduser = lambda p: os.path.join(TMP, "home") + p[1:]
+        try:
+            got = self.cloud._transcript(self.eid, "session_1")
+        finally:
+            self.cloud.subprocess.Popen, self.cloud.os.path.expanduser = real_popen, real_expand
+        self.assertEqual(got, holder["path"])
+        cmd = holder["cmd"]
+        self.assertIn("--teleport", cmd)
+        self.assertEqual(cmd[cmd.index("--teleport") + 1], "session_1")
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "")
+        self.assertEqual(holder["kw"]["env"], self.cloud._account_env(self.claude))
 
 
 class ExtraComputing(unittest.TestCase):
@@ -1405,7 +1710,6 @@ class ExtraComputing(unittest.TestCase):
         self.assertNotIn("secrets.", self.c.WORKFLOW_YML)
         self.assertIn("COMMAND: ${{ inputs.command }}", self.c.WORKFLOW_YML)   # passed by env, never pasted into the script
 
-=======
 class NativeWindows(unittest.TestCase):
     """Native Windows, no WSL underneath (T003/T015): its kind, its paths, its secrets, and the
     sandbox shape its runs carry. Module-state assertions run in a subprocess with ORBIT_OS=windows
@@ -1538,3 +1842,122 @@ class Mode(unittest.TestCase):
         osinfo.KIND = "wsl"
         reg["platform"]["sandbox_mode"] = "mxc"             # nonsense on non-Windows, but storage is neutral
         self.assertEqual(mxc.mode_info(reg)["sandbox_mode"], "mxc")
+
+
+
+class ClaudeAvailability(unittest.TestCase):
+    """T004 (FR-001–FR-004): the mandatory Claude check is installation-only. A signed-out client
+    passes; a missing or broken install gets installation/repair guidance with no account-login
+    wording, and no general path probes account status at all."""
+
+    def setUp(self):
+        self.real = engine.resolve_claude
+
+    def tearDown(self):
+        engine.resolve_claude = self.real
+
+    def status(self):
+        return orbit_cli().claude_status()                 # the same check setup and doctor use
+
+    def fake(self, **cfg):
+        d = tempfile.mkdtemp(dir=TMP)
+        p = fake_claude.install(d, **cfg)
+        engine.resolve_claude = lambda: p
+        return p
+
+    def test_signed_out_client_passes_the_mandatory_check(self):
+        p = self.fake(auth={"loggedIn": False, "authMethod": "none"})
+        ok, msg = self.status()
+        self.assertTrue(ok, msg)
+        self.assertEqual(engine.claude_availability()["state"], "available")
+        self.assertNotIn("sign", msg.lower())
+        self.assertNotIn("auth login", msg.lower())
+        self.assertIn("installed and available", msg)
+        all_calls = fake_claude.calls(os.path.dirname(p))
+        self.assertTrue(all_calls, "the fake was never invoked")
+        self.assertTrue(all(c["argv"] == ["--version"] for c in all_calls),
+                        "general availability must never call account status: %r" % [c["argv"] for c in all_calls])
+
+    def test_missing_client(self):
+        engine.resolve_claude = lambda: os.path.join(TMP, "no", "such", "claude")
+        ok, msg = self.status()
+        self.assertFalse(ok)
+        a = engine.claude_availability()
+        self.assertEqual(a["state"], "missing")
+        self.assertIn("Install", a["detail"])
+        self.assertNotIn("auth login", msg.lower())
+        self.assertNotIn("auth login", a["detail"].lower())
+
+    def test_broken_install(self):
+        self.fake(version={"exit": 3})
+        a = engine.claude_availability()
+        self.assertEqual(a["state"], "broken")
+        ok, msg = self.status()
+        self.assertFalse(ok)
+        self.assertIn("repair", msg.lower())
+        self.assertNotIn("auth login", msg.lower())
+        self.assertNotIn("sign", msg.lower())
+
+
+class SignedOutSetup(unittest.TestCase):
+    """T012 (SC-001): the whole setup → structured hiring → employee-task story on one temporary
+    Orbit home, with a fully signed-out fake Claude — every step succeeds on the effective
+    connection, and no general path calls or mentions an account-login command."""
+
+    @classmethod
+    def setUpClass(cls):
+        if osinfo.KIND == "windows":                       # only setUpClass touches the shared home
+            raise unittest.SkipTest("needs the POSIX fake shim (employee argv vs. cmd.exe quoting); "
+                                    "SC-001 runs in the macOS/Linux/WSL2 CI jobs")
+        engine.save_registry({"team_name": "Signed-out test", "owners": {"111": {"name": "Alex"}},
+                              "employees": {}, "defaults": {"model": "sonnet"}, "panel": {"port": 7397}})
+        os.makedirs(os.path.join(TMP, "team"), exist_ok=True)
+
+    def setUp(self):
+        self.reals = engine.resolve_claude
+        self.dir = tempfile.mkdtemp(prefix="fake-claude-")
+        engine.resolve_claude = lambda: fake_claude.install(
+            self.dir, auth={"loggedIn": False},
+            prompt={"result": "Morning notes ready.",
+                    "structured": {"intro": "One quick one.",
+                                   "questions": [{"type": "text", "q": "Anything else?"}],
+                                   "name": "Sam", "role": "Market researcher",
+                                   "scope": "Find market numbers the owner can use.",
+                                   "abilities": ["memory"], "routines": {}, "access": [],
+                                   "budget": "regular", "description": "Research support",
+                                   "first_task": "Check example.com", "plan": "Look at numbers",
+                                   "model": "sonnet"}})
+
+    def tearDown(self):
+        engine.resolve_claude = self.reals
+
+    def test_signed_out_setup_then_hiring_then_first_task(self):
+        import hire
+        import onboard
+        ok, msg = orbit_cli().claude_status()              # the setup/doctor check, signed out
+        self.assertTrue(ok, msg)
+        self.assertNotIn("sign in", msg.lower())
+        self.assertNotIn("auth login", msg.lower())
+        q = onboard.questions("Market researcher", "Find market numbers", name="Sam")
+        self.assertTrue(q["questions"] and q["intro"])
+        card = onboard.compose("Market researcher", "Find market numbers", "Sam",
+                               answers=[{"q": "Anything else?", "a": "No"}])
+        self.assertEqual(card["budget"], "regular")        # the interview produced a real card
+        eid = hire.hire(card["name"], card["role"], card["role"], supervisor="Alex", picked=["fetch"])
+        out = engine.run(engine.employee(eid), "Write today's morning brief.")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["text"], "Morning notes ready.")
+        recs = fake_claude.calls(self.dir)
+        self.assertEqual(len(recs), 4)                     # availability, interview, card, task
+        self.assertTrue(all(c["argv"][0] in ("--version", "-p") for c in recs),
+                        "no path may call account status or any other subcommand: %r"
+                        % [c["argv"][:2] for c in recs])
+        for c in recs:                                     # nothing resolved an account
+            self.assertNotEqual(c["argv"][:2], ["auth", "status"])
+        texts = (msg, out["text"], json.dumps(card))
+        for t in texts:
+            self.assertNotIn("auth login", t.lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

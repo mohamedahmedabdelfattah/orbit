@@ -4,9 +4,9 @@
 
 **Created**: 2026-11-05
 
-**Revised**: 2026-11-06
+**Revised**: 2026-11-07 (remediation of specification analysis findings)
 
-**Status**: Approved design and implementation tasks; ready for analysis
+**Status**: Specification, plan, and tasks remediated; ready for implementation
 
 **Input**: "Bypass the Claude sign-in requirement. Orbit should accept the installed Claude client and use whatever inference or connection Claude already has, without Orbit adding inference support."
 
@@ -36,7 +36,7 @@ The owner configures Claude itself. Orbit's hiring interview, employee chats, ro
 
 **Why this priority**: Removing setup's gate has no value if later Orbit subprocesses erase the connection.
 
-**Independent Test**: Put sentinel connection values in Claude user settings and the process environment, run fake-Claude hiring and employee paths, and verify each process sees them together with unchanged Orbit safety arguments.
+**Independent Test**: Inventory every production Claude invocation, put sentinel connection values in Claude user settings and the process environment, and verify every ordinary fake-Claude path receives them together with unchanged Orbit safety arguments and the required setting sources.
 
 **Acceptance Scenarios**:
 
@@ -61,6 +61,7 @@ Local Orbit work starts without an `api.anthropic.com` preflight. Claude's actua
 1. **Given** Anthropic is unreachable but Claude's configured connection works, **When** a chat or routine starts, **Then** Orbit invokes Claude without waiting for Anthropic connectivity.
 2. **Given** Claude reports a connection, authentication, or provider error, **When** Orbit presents the failure, **Then** the message refers to Claude's configured connection and directs the owner to verify Claude, not necessarily to `claude auth login`.
 3. **Given** Claude reports a transient network or rate-limit failure, **When** a scheduled routine fails, **Then** Orbit retains its existing later-retry behavior without selecting another provider.
+4. **Given** Orbit inherits a connection credential that Claude does not print, **When** a Claude call fails, **Then** Orbit retains the process result and failure classification without copying that inherited value into Orbit-generated diagnostics.
 
 ---
 
@@ -70,13 +71,15 @@ Cloud Shift remains an Anthropic-account feature. Owners using another Claude co
 
 **Why this priority**: Removing the global account requirement must not make an account-only feature appear available or auto-enable it for new hires.
 
-**Independent Test**: Return `third_party`, `api_key`, `none`, and `claude.ai` account methods from fake account checks. Verify Cloud Shift is available only for the qualifying account method and only that path can auto-enable it.
+**Independent Test**: Return `third_party`, `api_key`, `api_key_helper`, `oauth_token`, `none`, and `claude.ai` account methods from fake account checks. Verify only a fresh qualifying account result can manually enable, auto-enable, or launch Cloud Shift, and that losing eligibility blocks the next cloud operation without affecting ordinary local work.
 
 **Acceptance Scenarios**:
 
 1. **Given** Claude uses a third-party connection and has no qualifying Claude account session, **When** an employee is hired, **Then** local work starts normally and Cloud Shift is not enabled.
 2. **Given** a qualifying Claude account session exists, **When** the owner enables Cloud Shift, **Then** existing Cloud Shift behavior remains unchanged.
 3. **Given** no qualifying account exists, **When** the owner views or enables Cloud Shift, **Then** Orbit explains that this optional feature needs a Claude account without treating local work as broken.
+4. **Given** Cloud Shift was enabled while a qualifying account existed and that eligibility is later removed, **When** the next Cloud Shift run starts, **Then** the cloud run is blocked with an account-only explanation while ordinary local work remains available.
+5. **Given** a read-only availability result is cached as eligible and eligibility is then removed, **When** the owner attempts manual enablement, new-hire auto-enablement, or a cloud launch, **Then** Orbit performs a fresh account-specific check and rejects the operation.
 
 ### Edge Cases
 
@@ -104,11 +107,11 @@ Cloud Shift remains an Anthropic-account feature. Owners using another Claude co
 
 #### Claude Pass-Through
 
-- **FR-005**: For ordinary local work outside legacy Orbit API-key mode, Orbit MUST preserve Claude/provider environment values inherited by its process. It MAY remove `CLAUDECODE` to permit a child Claude process and MUST override same-named Orbit runtime/safety values.
+- **FR-005**: For ordinary local work outside legacy Orbit API-key mode, Orbit MUST preserve the complete process environment inherited by its process, including Claude/provider values and unrecognized future values, instead of filtering by provider-name prefixes; the only inherited value Orbit MUST delete is the `CLAUDECODE` recursion marker. Orbit MUST override same-named inherited values with exactly the enumerated Orbit-owned runtime and safety values defined in the launch contract. This whole-environment inheritance is an explicit documented trust decision: values unrelated to Claude, including any secrets present in Orbit's service environment, reach Claude by design, and documentation MUST disclose this (FR-025).
 - **FR-006**: Ordinary employee runs MUST load Claude's user and project setting sources. Structured onboarding calls MUST load Claude's user setting source.
-- **FR-007**: Orbit MUST apply the same pass-through policy to every local model-backed flow, including hiring, chats, routines, summaries, role processing, and plugin preparation where applicable.
+- **FR-007**: Every production Claude invocation owned by Orbit MUST resolve to exactly one behavioral class per execution: installation check, ordinary pass-through, legacy Orbit API-key, interactive application, or Cloud Shift. Every ordinary local model-backed flow—including hiring, chats, routines, summaries, role processing, and plugin preparation—MUST use the ordinary pass-through policy when the team is not in legacy Orbit API-key mode. Shared launch sites whose behavior depends on that mode MUST resolve to exactly one class per execution (ordinary pass-through when the stored key is absent, legacy Orbit API-key when it governs), and the launch inventory MUST list each such site's permitted class pair. No production Claude invocation may execute without a resolved class or bypass an assigned class.
 - **FR-008**: Orbit MUST keep its explicit command-line sandbox, guard, allowed/disallowed tool, strict-MCP, workspace, prompt, and session controls in place.
-- **FR-009**: Owner Claude user settings, including hooks and plugins, MUST be treated as trusted configuration and MAY run in Orbit-launched Claude sessions.
+- **FR-009**: In ordinary pass-through sessions only, owner Claude user settings, including hooks and plugins, MUST be treated as trusted configuration and MAY run in Orbit-launched Claude sessions. Legacy Orbit API-key sessions, Cloud Shift account checks, and all Cloud Shift launches MUST NOT load Claude user setting sources; their existing isolation is unchanged.
 - **FR-010**: Orbit MUST NOT add provider profiles, endpoint configuration, provider credentials, model discovery, provider readiness probes, a relay, or a replacement inference client.
 - **FR-011**: Orbit MUST continue passing its selected employee model alias and effort to Claude; Claude remains responsible for resolving them against its configured connection.
 - **FR-012**: Existing installations using Orbit's stored Anthropic API-key mode MUST retain their current isolated environment and key-injection behavior.
@@ -117,23 +120,23 @@ Cloud Shift remains an Anthropic-account feature. Owners using another Claude co
 
 - **FR-013**: Ordinary local work MUST NOT depend on a successful connection to `api.anthropic.com` before Claude is invoked.
 - **FR-014**: Claude's actual process result MUST be the source of truth for connection readiness and failure.
-- **FR-015**: Connection, authentication, provider, network, and rate-limit failures MUST use provider-neutral owner-facing language while preserving safe diagnostic detail in existing logs.
+- **FR-015**: Connection, authentication, provider, network, and rate-limit failures MUST use provider-neutral owner-facing language. Orbit MUST preserve the existing process result, failure classification, and Claude-provided output/error logging behavior. Orbit-generated diagnostics MUST NOT copy values originating in inherited Claude user settings or the inherited process environment—credential values or otherwise—into failure records, and MUST NOT add guessed provider details; values Orbit already computes itself for the session (such as session identifiers, workspace paths, and run timings) remain permitted.
 - **FR-016**: Existing transient-failure scheduling and retry behavior MUST remain, but Orbit MUST NOT route a failed request to another provider.
 
 #### Account-Only Boundary
 
-- **FR-017**: Cloud Shift MUST remain unavailable unless a separate account-specific check, run without inherited provider configuration or user setting sources, returns `loggedIn: true` with `authMethod: "claude.ai"`.
-- **FR-018**: New hires MUST NOT auto-enable Cloud Shift when that account-specific check fails, even when ordinary Claude work is available.
-- **FR-019**: Cloud Shift's account-only environment and routing MUST remain isolated from third-party Claude user settings.
+- **FR-017**: Cloud Shift availability, manual enablement, new-hire auto-enablement, and every Cloud Shift launch MUST require `loggedIn: true` with `authMethod: "claude.ai"` from an account-specific check run without inherited provider configuration or user setting sources. Read-only status displays MAY cache the result for no more than 60 seconds. Manual enablement, auto-enablement, and Cloud Shift launches MUST use a fresh check. If an already-enabled shift loses eligibility, its next cloud launch MUST be blocked with an account-only explanation while ordinary local work remains available. Owner disablement clears the local switch without requiring eligibility; any remote cleanup it attempts is best-effort and, when attempted, MUST itself satisfy the fresh eligibility check and the account-environment rules of FR-017 and FR-019.
+- **FR-018**: (Normative restatement of FR-017's auto-enablement rule, retained as a separately tested safety invariant.) New hires MUST NOT auto-enable Cloud Shift when the FR-017 account-specific check fails, even when ordinary Claude work is available. FR-017 governs; FR-018 exists so this single behavior can be tested on its own.
+- **FR-019**: Cloud Shift account checks and launches MUST receive only the operating-system environment needed to execute Claude, access its native account state, and use temporary files. They MUST NOT inherit ordinary provider routing, endpoint, token, API-key, proxy, arbitrary connection values, or Claude user setting sources. Isolation MUST remain effective for unrecognized future provider variable names, not only a fixed list of known prefixes.
 
 #### Privacy, Compatibility, and Documentation
 
-- **FR-020**: Orbit MUST NOT deliberately serialize or echo inherited Claude connection credential values into its registry, employee files, UI, activity records, or logs. Claude-generated output and errors remain subject to Orbit's existing logging behavior.
+- **FR-020**: Orbit MUST NOT deliberately serialize or echo inherited Claude connection credential values into Orbit-generated registry data, employee files, UI responses, activity records, diagnostic metadata, or logs. This prohibition applies to data Orbit obtains from settings or its process environment. It does not require Orbit to inspect or redact values that Claude itself emits in output or errors; Claude-generated content retains its existing logging behavior.
 - **FR-021**: Orbit MUST NOT claim that an inherited connection is local, private, provider-pinned, compatible, or unable to fall back; those properties remain Claude/configuration responsibilities.
 - **FR-022**: Existing employee data, sessions, histories, roles, routines, abilities, connector grants, and safety settings MUST require no migration.
 - **FR-023**: Documentation MUST describe Claude account sign-in as one supported Claude configuration, not a global Orbit prerequisite.
 - **FR-024**: Documentation MUST state that unattended Orbit work needs connection configuration available to the background service, normally through persistent Claude user/managed settings, native credentials, or OS service environment rather than an ephemeral shell export.
-- **FR-025**: Documentation MUST disclose that exact pass-through trusts owner Claude hooks and plugins and does not add credential isolation beyond Claude's behavior.
+- **FR-025**: Documentation MUST disclose that exact pass-through trusts owner Claude hooks and plugins and does not add credential isolation beyond Claude's behavior, and that ordinary pass-through forwards Orbit's complete inherited service environment—Claude/provider values and any unrelated values present—to Claude and to processes Claude itself launches.
 
 ### Scope Boundaries
 
@@ -164,14 +167,15 @@ No new persisted Orbit entity is introduced. Relevant external state is Claude C
 
 ### Measurable Outcomes
 
-- **SC-001**: A test installation with Claude account status signed out but a successful fake Claude connection completes setup, hiring, and one employee task without an account-login instruction.
-- **SC-002**: Automated tests prove 100% of ordinary local Claude launch paths preserve connection sentinels and select the required user setting source.
+- **SC-001**: One automated validation uses the same temporary Orbit installation and fake Claude executable to complete the mandatory setup check, structured hiring, and one employee task while account status is `loggedIn: false`; no step invokes or presents `claude auth login`.
+- **SC-002**: An enumerated launch inventory covers 100% of production Claude invocation sites. Automated validation proves every ordinary local invocation uses pass-through behavior, preserves an arbitrary inherited connection sentinel, removes the recursion marker, applies Orbit-owned overrides, and selects its required setting sources. Validation fails when a new production invocation has no behavioral classification.
 - **SC-003**: With `api.anthropic.com` unreachable and fake Claude healthy, an employee run starts without the former connectivity wait and completes successfully.
 - **SC-004**: Existing sandbox, guard, tool-deny, MCP, workspace, and session command assertions remain passing after user settings are enabled.
 - **SC-005**: Existing Orbit-managed Anthropic API-key tests remain passing with no routing or credential-source change.
-- **SC-006**: Automated Cloud Shift tests prove `third_party`, `api_key`, `oauth_token`, and `none` methods cannot enable or auto-enable Cloud Shift, while `loggedIn: true` with `authMethod: "claude.ai"` retains existing behavior.
-- **SC-007**: Repository-wide searches find no generic setup, checklist, Settings, installer, or error text that states Claude account sign-in is required for ordinary Orbit work.
+- **SC-006**: Automated Cloud Shift validation proves `third_party`, `api_key`, `api_key_helper`, `oauth_token`, and `none` methods cannot manually enable, auto-enable, or launch Cloud Shift. A fresh qualifying `claude.ai` result retains existing behavior, while a transition from eligible to ineligible blocks the next cloud operation without blocking ordinary local work.
+- **SC-007**: A repository-wide scan of all tracked production, setup, template, and documentation files finds no generic statement that Claude account sign-in is required for ordinary Orbit work. Historical specifications, test fixtures, and exact allowlisted Cloud Shift account-only messages MAY be excluded.
 - **SC-008**: Implementation adds no provider schema, provider module, gateway endpoint field, credential store, relay, inference dependency, or team-data migration.
+- **SC-009**: Failure validation proves Orbit retains the process result and failure classification while no inherited credential sentinel enters Orbit-generated registry data, employee files, UI responses, activity records, diagnostic metadata, or logs. Claude-generated output/error behavior remains unchanged.
 
 ## Assumptions and Dependencies
 

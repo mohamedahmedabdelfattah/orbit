@@ -48,7 +48,7 @@ WORK_DIRS = ("research", "notes", "tools", "growth", "evals")
 TEXT_EXT = (".md", ".txt", ".json", ".jsonl", ".csv", ".tsv", ".py", ".sh", ".js", ".html", ".yaml", ".yml", ".log")
 MAX_FILE = 400_000
 DEMO = bool(os.environ.get("STAFFROOM_DEMO"))
-_auth = {"at": 0.0, "ok": None, "note": ""}
+_availability = {"at": 0.0, "value": None}
 
 
 def port() -> int:
@@ -79,25 +79,31 @@ def daemon_online() -> bool:
         return False
 
 
-def claude_auth() -> dict:
-    """`claude auth status`, cached for ten minutes (it takes a second)."""
+def claude_available() -> dict:
+    """L01 (read-only, 60 s cache): provider-neutral Claude Code installation availability for the
+    checklist and Settings. The account is never part of general readiness (FR-003/FR-004)."""
     if DEMO:
-        return {"at": time.time(), "ok": True, "note": "demo"}
-    if time.time() - _auth["at"] < 600:
-        return _auth
-    _auth["at"] = time.time()
+        return {"state": "available", "detail": "The demo has no Claude install to check."}
+    if time.time() - _availability["at"] < 60:
+        return _availability["value"]
     try:
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_")) and k != "CLAUDECODE"}
-        r = subprocess.run([engine.resolve_claude(), "auth", "status"], capture_output=True, text=True, timeout=20, env=env)
-        d = json.loads(r.stdout or "{}")
-        _auth["ok"] = bool(d.get("loggedIn"))
-        _auth["note"] = d.get("authMethod", "") if _auth["ok"] else "not signed in"
+        value = engine.claude_availability()
     except Exception as ex:  # noqa: BLE001
-        _auth["ok"], _auth["note"] = None, "couldn't check (%s)" % ex.__class__.__name__
-    return _auth
+        value = {"state": "broken", "detail": "couldn't check (%s)" % ex.__class__.__name__}
+    _availability.update(at=time.time(), value=value)
+    return value
 
 
 # ------------------------------------------------------------------ reading the team
+def cloud_shift_view() -> dict:
+    """Read-only Cloud Shift eligibility for the panel (60 s display cache only). This is a separate
+    account contract: it never changes general Claude installation readiness (FR-003, FR-017)."""
+    import cloud
+    acct = cloud.account_status()
+    return {"eligible": acct["eligible"], "auth_method": acct["auth_method"],
+            "checked_at": acct["checked_at"], "why_not": acct["reason"]}
+
+
 def members():
     reg = engine.registry()
     total = len(abilities.catalog())
@@ -182,7 +188,7 @@ def needs_you(emps, ords, pending, usage):
                        "detail": "Nothing runs on a sleeping computer. Leave it plugged in with the lid open, or change Keep awake in Settings.",
                        "href": "/settings#awake"})
     if usage.get("five_hour", 0) >= 80 or usage.get("seven_day", 0) >= 90:
-        out.append({"kind": "usage", "title": "Claude plan usage is high", "detail": "Employees switch to the light model until it resets.", "href": "/settings"})
+        out.append({"kind": "usage", "title": "Claude usage is high", "detail": "Employees switch to the light model until it resets.", "href": "/settings"})
     return out[:30]
 
 
@@ -190,13 +196,14 @@ def checklist(emps, feed):
     """What's left to set up, in plain words. Each item either has a button in the panel (href) or says
     what to ask Claude; no Terminal commands."""
     reg = engine.registry()
-    auth = claude_auth()
+    av = claude_available()
     model = os.path.join(engine.HOME, "models", "ggml-large-v3-turbo-q5_0.bin")
     if DEMO:
         return [{"id": "demo", "done": True, "title": "Demo team", "how": ""}]
     return [
-        {"id": "claude", "done": bool(auth["ok"]), "title": "Signed in to Claude",
-         "how": "Ask Claude (in the Claude app, Code tab): “Sign in Claude Code for my Orbit.”"},
+        {"id": "claude", "done": av["state"] == "available", "title": "Claude Code installed",
+         "how": {"missing": "Install Claude Code from https://claude.com/claude-code.",
+                 "broken": "Repair or update Claude Code, then retry."}.get(av["state"], "")},
         {"id": "hire", "done": bool(emps), "title": "Your first employee", "how": "Pick what they should do.", "href": "/welcome", "cta": "Hire"},
         {"id": "phone", "done": any(not o.get("local") for o in reg.get("owners", {}).values()), "title": "Your team on your phone",
          "how": "Telegram, Slack or Discord, through a bot of your own. About two minutes.", "href": "/connect", "cta": "Connect"},
@@ -375,7 +382,7 @@ def state():
     me = next(iter(reg.get("owners", {}).values()), {}).get("name", "Owner")
     return {"team_name": reg.get("team_name", "Orbit"), "me": me, "online": daemon_online(),
             "workdays": reg.get("workdays", ["Mon", "Tue", "Wed", "Thu", "Fri"]), "now": time.strftime("%Y-%m-%dT%H:%M:%S"), "demo": DEMO, "device": osinfo.DEVICE, "update": update_view(),
-            "usage": usage, "owners": [{"id": i, "name": o["name"], "local": bool(o.get("local")),
+            "usage": usage, "cloud_shift": cloud_shift_view(), "owners": [{"id": i, "name": o["name"], "local": bool(o.get("local")),
                                         "addresses": [channels.label(i)] + [channels.label(a) for a in o.get("addresses", [])]}
                                        for i, o in reg.get("owners", {}).items()],
             "employees": emps, "feed": feed, "orders": ords,
@@ -605,7 +612,7 @@ def settings_view():
     return {"team_name": reg.get("team_name", ""), "about": about, "workdays": reg.get("workdays", ["Mon", "Tue", "Wed", "Thu", "Fri"]),
             "network_domains": reg.get("network_domains", []), "jobs": {j: team.job_spec({}, j)["at"] for j in team.JOBS},
             "apify": {"token": bool(engine.secret("apify_token")), "spent": spent + pending, **reg.get("apify", {})},
-            "auth": reg.get("auth", "subscription"), "claude": claude_auth(),
+            "auth": reg.get("auth", "subscription"), "claude": claude_available(), "cloud_shift": cloud_shift_view(),
             "channels": {n: {"on": n in on, "team_chat": chats.get(n, "")} for n in channels.NAMES},
             "keep_awake": reg.get("keep_awake") or "plugged", "compute": (reg.get("compute") or {}).get("repo", ""), "home": engine.HOME, "kit": engine.KIT, "port": port()}
 
@@ -816,7 +823,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve():
     token()
-    threading.Thread(target=claude_auth, daemon=True).start()
+    threading.Thread(target=claude_available, daemon=True).start()
     srv = ThreadingHTTPServer(("127.0.0.1", port()), Handler)
     srv.daemon_threads = True
     team.log("panel on http://127.0.0.1:%d" % port())
