@@ -45,7 +45,7 @@ def state(d, on_end=None):
     a = os.path.join(d, ".audio")
     os.makedirs(a, exist_ok=True)
     tp = os.path.join(d, "transcript.md")
-    with open(tp, "w") as fh:
+    with open(tp, "w", encoding="utf-8") as fh:
         fh.write(osinfo.local("# Live call: t\n\nStarted now by Alex · heard on this Mac\n\n"))
     return {"emp_id": "lina", "name": "Lina", "by": "Alex", "title": "t", "started": "2026-10-30T10:00:00", "t0": time.time() - 90,
             "dir": d, "audio": a, "ws": d, "transcript_abs": tp, "transcript": "transcript.md", "offset": {"them": 0, "you": 0},
@@ -88,7 +88,7 @@ class Transcript(unittest.TestCase):
         said = {0: [(1, "Thirty one dollars a kilo from December.")]}
         calls._whisper = lambda a, prompt="": said[0] if len(a) else []
         calls._consume(st, final=True)
-        with open(st["transcript_abs"]) as fh:
+        with open(st["transcript_abs"], encoding="utf-8") as fh:
             body = fh.read()
         self.assertIn("[00:00:01] Them: Thirty one dollars a kilo from December.", body)
         self.assertNotIn("You:", body)                 # the mic heard the speakers: not counted twice
@@ -120,7 +120,7 @@ class Transcript(unittest.TestCase):
         info = calls._finish(st)
         self.assertFalse(os.path.exists(st["audio"]))
         self.assertEqual(ended[0]["transcript"], "transcript.md")
-        with open(st["transcript_abs"]) as fh:
+        with open(st["transcript_abs"], encoding="utf-8") as fh:
             self.assertIn(osinfo.local("min · heard on this Mac"), fh.read())
         self.assertNotIn("lina", calls.CALLS)
         self.assertEqual(info["lines"], 1)
@@ -130,7 +130,7 @@ class Transcript(unittest.TestCase):
         st = state(self.d, on_end=lambda eid, info: ended.append(info))
         calls.CALLS["lina"] = st
         calls._finish(st)
-        with open(st["transcript_abs"]) as fh:
+        with open(st["transcript_abs"], encoding="utf-8") as fh:
             self.assertIn("Nothing was heard", fh.read())
         self.assertEqual(ended, [])
 

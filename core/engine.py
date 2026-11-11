@@ -8,11 +8,15 @@
 Every run is the unmodified `claude` CLI, using the connection its owner already configured there (a
 Claude account, an organization setup, or an API key), headless in the employee's folder, and gets
 whatever the employee's profile says:
-  * the OS sandbox: shell commands reach only approved hosts and can't read secrets or colleagues'
-    folders. The toolbelt gateways (staff-fetch, staff-browse, staff-apify, staff-watch) run outside
-    it because they enforce their own limits (public web only, GET only, budget);
-  * the staff guard (a Claude Code mod): blocks outside contact, payment sites, secrets, editing the
-    harness; masks card numbers and IBANs; records plan usage;
+  * on Mac, Linux and WSL, the OS sandbox is off by default since 0.13: the crew works on this computer
+    like a person at it would, each in its own browser window (browser.py). A team that wants the
+    sandbox back sets "sandbox": true in staff.json: shell commands then reach only approved hosts and
+    can't read secrets or colleagues' folders. Native Windows always contains shell commands with MXC.
+    The toolbelt gateways (staff-fetch, staff-browse, staff-apify, staff-watch) run outside either
+    boundary because they enforce their own limits (public web only, GET only, budget);
+  * the staff guard (a Claude Code mod): blocks money, payment sites, secrets, the owner's own browser
+    and mail, messaging anyone but the owners, editing the harness; masks card numbers and IBANs;
+    records plan usage;
   * abilities: tools, gateway commands and skills switched on or off per employee;
   * model routing: the employee's model, or the fallback when plan usage is high;
   * a cost/reliability log in <workspace>/state/runs.jsonl.
@@ -405,12 +409,19 @@ def require_employee_launch(emp: dict = None, surface: str = "run") -> None:
         raise RuntimeError(err)
 
 
+def sandboxed() -> bool:
+    """The team's choice (staff.json "sandbox": true). Off by default since 0.13: the sandbox stopped the crew
+    from working freely (its own browser window, tools installed anywhere, programs it starts)."""
+    return registry().get("sandbox") is True
+
+
 def sandbox_blob(emp: dict, unsandboxed: list) -> dict:
-    """The run's sandbox as a settings blob: its folder, no secrets, no colleagues. Network: the
-    approved sites only, or (Full autonomy) any site, with the filesystem limits unchanged.
-    On native Windows the built-in sandbox doesn't exist, so the failIfUnavailable requirement is
-    omitted (the agent starts normally) and containment arrives instead through the PreToolUse
-    hook, which makes MXC the per-command boundary (research D9, contracts/cc-hook.md)."""
+    """The run's sandbox settings when the optional team sandbox or mandatory native MXC is active:
+    its folder, no secrets, no colleagues. Network: the approved sites only, or (Full autonomy) any
+    site, with the filesystem limits unchanged. On native Windows the built-in sandbox doesn't exist,
+    so the failIfUnavailable requirement is omitted (the agent starts normally) and containment arrives
+    instead through the PreToolUse hook, which makes MXC the per-command boundary (research D9,
+    contracts/cc-hook.md)."""
     others = [p for p in glob.glob(os.path.join(HOME, "employees", "*"))
               if os.path.realpath(p) != os.path.realpath(emp["workspace"])]
     domains = BASE_DOMAINS + registry().get("network_domains", []) + emp.get("network_domains", [])
@@ -432,7 +443,13 @@ def sandbox_blob(emp: dict, unsandboxed: list) -> dict:
 
 
 def settings_json(emp: dict, unsandboxed: list) -> str:
-    """The run's settings blob (see sandbox_blob)."""
+    """The run's settings. On a Mac, in WSL and on Linux the team's sandbox choice (staff.json
+    "sandbox", off by default since 0.13) decides: on means the folder, no secrets, no colleagues and
+    the approved sites only (or any site with Full autonomy), with the filesystem limits unchanged;
+    off means no sandbox. On a native Windows PC the machine's own containment decides instead: in
+    mxc mode every shell command runs in its Microsoft Execution Container, flag or no flag."""
+    if not sandboxed() and not (osinfo.KIND == "windows" and recorded_sandbox_mode() == "mxc"):
+        return json.dumps({"enabledPlugins": {}, "sandbox": {"enabled": False}})
     return json.dumps(sandbox_blob(emp, unsandboxed))
 
 
@@ -493,8 +510,7 @@ def command(emp: dict, model: str, interactive: bool = False) -> list:
     allow, block = abilities.tools(emp["id"])
     gateways = abilities.commands(emp["id"])
     bundle = skills_plugin(emp, abilities.skills(emp["id"]))
-    import connectors                                      # the MCP servers the owner granted this crew member
-    servers = connectors.mcp_config(emp)["mcpServers"]
+    servers = mcp_servers(emp)
     mcp = []
     if servers:
         path = os.path.join(HOME, ".runtime", emp["id"], "mcp.json")
@@ -514,9 +530,16 @@ def command(emp: dict, model: str, interactive: bool = False) -> list:
            "--disallowedTools", *(platform_denied() + block + emp.get("extra_denied", []))]
     for extra in emp.get("add_dirs", []):
         cmd += ["--add-dir", os.path.expanduser(extra)]
-    if "act_in_browser" in abilities.effective(emp["id"]):   # the owner's own Chrome, through Claude in Chrome
-        cmd.append("--chrome")
-    return cmd
+    return cmd                                             # no --chrome: the owner's own Chrome is never theirs
+
+
+def mcp_servers(emp: dict) -> dict:
+    """The MCP servers a crew member works with: the connectors its owner granted, and its own browser window."""
+    import browser
+    import connectors
+    servers = dict(connectors.mcp_config(emp)["mcpServers"])
+    servers.update(browser.mcp_server(emp))
+    return servers
 
 
 NETWORK = re.compile(
@@ -896,8 +919,8 @@ def stats(emp: dict) -> dict:
 # ------------------------------------------------------------------ a Claude session in the employee's folder
 def claude_session(emp_id: str) -> dict:
     """Readies the employee's folder so a Claude app session opened there is that employee, with the same locks
-    as its runs: the sandbox, the deny list and the guard (installed for this folder only), its abilities and
-    its tools. Written to .claude/settings.local.json, which the harness's own runs don't read (they use
+    as its runs: the deny list, the guard (installed for this folder only), the team's sandbox if it has one, its
+    abilities, its own browser and its tools. Written to .claude/settings.local.json, which the harness's own runs don't read (they use
     --setting-sources project), so runs and sessions never double up. → {"folder", "link", "hello", "chat"}: `link` opens a new Claude app chat there
     whose first message sets up its routines (claudeapp); `chat` is the chat once it has (None before)."""
     import abilities
@@ -919,9 +942,8 @@ def claude_session(emp_id: str) -> dict:
             local = json.load(fh)
     except (OSError, ValueError):
         local = {}
-    import connectors
-    servers = connectors.mcp_config(emp)["mcpServers"]
-    mcp_path = os.path.join(ws, ".mcp.json")              # the granted connectors, pre-approved below
+    servers = mcp_servers(emp)
+    mcp_path = os.path.join(ws, ".mcp.json")              # the granted connectors and its own browser, pre-approved below
     if servers:
         with open(mcp_path, "w", encoding="utf-8") as fh:
             json.dump({"mcpServers": servers}, fh, indent=2)
@@ -929,7 +951,7 @@ def claude_session(emp_id: str) -> dict:
         os.remove(mcp_path)
     perms = {"allow": [t for t in platform_allowed() if t not in block] + allow + emp.get("extra_tools", []) +
              ["mcp__%s" % n for n in servers], "deny": deny}
-    if autonomous(emp):                                    # the owner's choice: no stops; the sandbox is the boundary
+    if autonomous(emp):                                    # the owner's choice: no stops; the guard is the boundary
         perms["defaultMode"] = "bypassPermissions"
         perms["allow"] += [t for t in ("WebSearch", "WebFetch", "Task", "NotebookEdit") if t not in perms["allow"]]
     local["enabledMcpjsonServers"] = sorted(servers)

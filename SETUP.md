@@ -76,9 +76,9 @@ installer/doctor sends older or unsupported builds to the WSL2 fallback below.
 
 ## Windows through WSL (the fallback)
 For Windows 10, or Windows 11 machines where the doctor says the MXC runtime can't run. Orbit runs
-inside WSL 2 there: that is what lets it keep the crew in a sandbox. You run each Linux
-command from here with `wsl -d <distro> -- bash -lc "<command>"` (the distro name comes from step 1;
-usually `Ubuntu`). Quote the command so the Windows shell passes it through whole.
+inside WSL 2 there. Its bubblewrap sandbox is optional and off by default; `orbit sandbox on` enables
+it. You run each Linux command from here with `wsl -d <distro> -- bash -lc "<command>"` (the distro name
+comes from step 1; usually `Ubuntu`). Quote the command so the Windows shell passes it through whole.
 1. `wsl -l -v`. If it lists no distro, or says WSL isn't installed, tell them: "Windows needs its Linux
    part turned on, once. Click Start, type **PowerShell**, right-click it and choose **Run as
    administrator**, then type `wsl --install` and press Enter. Restart when it asks. After the restart
@@ -88,7 +88,7 @@ usually `Ubuntu`). Quote the command so the Windows shell passes it through whol
 2. Get the kit: `wsl -d <distro> -- bash -lc "git -C ~/orbit pull --ff-only 2>/dev/null || git clone
    https://github.com/BasemTarekkamal/orbit ~/orbit"`. If git is missing, step 3 installs it: do step 3
    first, then this.
-3. System packages (the sandbox, voice, OCR, the browser's libraries) need their Ubuntu password. Ask
+3. System packages (voice, OCR, the browser's libraries, and the optional sandbox's helpers) need their Ubuntu password. Ask
    them to type this in the Ubuntu window and wait until it prints Done:
    `sudo sh ~/orbit/setup-linux.sh`
    (if ~/orbit isn't there yet: `sudo apt-get update && sudo apt-get install -y git`, then step 2, then this).

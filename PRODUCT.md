@@ -1,6 +1,6 @@
 # Product
 
-**Current product version (0.12.0):** Native Windows 11 source support uses Microsoft Execution
+**Current product version (0.13.0):** Native Windows 11 source support uses Microsoft Execution
 Containers (MXC) for crew shell commands, with WSL2 retained as an explicit fallback. Product-release
 readiness remains blocked: feature 003's required containment implementation and candidate-bound x64
 and ARM64 real-host evidence are absent. Historical quickstart output is not a substitute, and the

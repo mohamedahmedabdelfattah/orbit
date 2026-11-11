@@ -5,7 +5,7 @@
 **Your AI workforce. In motion.**
 Build your team. Assign missions. Get things done.
 
-**Current source version: 0.12.0.** Orbit includes a native Windows 11 path. Microsoft Execution
+**Current source version: 0.13.0.** Orbit includes a native Windows 11 path. Microsoft Execution
 Containers (MXC) keep each crew shell command contained; WSL2 remains an explicit fallback. Native
 Windows release readiness is still blocked by the feature-003 containment work and real-host evidence
 described below.
@@ -174,6 +174,10 @@ and claim comes with a source link.
   heavy it starts fresh on the next day, and the files (plan, state, tasks, lessons) carry the memory across.
   Where employee Desktop sessions are supported, **Open in Claude** opens that very conversation, so your chat
   window and their workday are the same thing. Native Windows uses the contained `orbit chat` window instead.
+- **A browser window of their own:** each crew member browses in its own Chrome window, apart from yours and
+  from each other's: it keeps its tabs and stays signed in where you sign it in, once (`orbit browser <handle>`
+  opens it for you). It never touches your own Chrome. Every run and its Claude chat share that one window, and
+  it opens only when they actually browse.
 - **Nothing they say gets lost:** every report lands in the team room, on your phone when one is connected,
   and otherwise as a notification on this computer; `orbit inbox` and the panel count what you haven't seen.
 - **A brain and hands:** the brain thinks and talks with you (standup, initiative, end of day, the weekly
@@ -191,7 +195,7 @@ and claim comes with a source link.
      initiative and the end of day), your computer tells the cloud "skip this one, I'm here". If it can't, because it's
      closed or offline, the shift starts by itself and the crew member works there, with a report to your phone, day
      after day. When your computer is back, their cloud work comes home and they merge it. The cloud has no access to
-     your Chrome or accounts, so posting and uploads wait for your computer. It costs a few thousand tokens a day when
+     their browser windows or your accounts, so posting and uploads wait for your computer. It costs a few thousand tokens a day when
      your computer is on; a real shift when it's away counts like any other run under your Claude configuration.
   3. **Your own GitHub, only if you want it (Settings → Extra computing).** A private repository you make, for heavy
      jobs on your free GitHub Actions minutes. Nothing depends on it.
@@ -250,27 +254,32 @@ who don't live in Terminal: every setting is a button or a form.
 
 ## Safe by design
 
-An autonomous agent that reads the open web needs locks, not promises. Every run gets:
+An autonomous agent that reads the open web needs locks, not promises. On Mac, Linux and WSL, your crew
+works on your computer freely by default (since 0.13): no OS sandbox boxes them in, so they install what
+they need, run the programs they start and browse in their own windows. Native Windows is the exception:
+MXC contains every shell command even when the optional team-sandbox setting is off. Every run gets:
 
-- **The sandbox** (macOS's own on a Mac; bubblewrap on Linux and in WSL, the same one Claude Code
-  uses; on a Windows PC, Microsoft Execution Containers — one container per shell command): shell
-  commands reach only the sites you approve, and can't read your secrets, your Documents,
-  Desktop or Downloads, or a colleague's folder. If the sandbox can't start, the command is denied,
-  never run unprotected.
-- **A guard** (a Claude Code hooks module, tested): no money movement, no banking, payment or
-  crypto sites, no outside messages (no email, no posting, no raw chat APIs), no secrets, no editing
-  the kit, its registry or the guard, no nested Claude runs. Card numbers and IBANs are masked before
-  the model sees them.
-- **Gateways for the open web:** the page reader, the browser, Apify and the watchers run outside
-  the sandbox but enforce their own rules: public http(s) pages only (never your computer or your local
-  network), read-only, no logins, no form filling, robots.txt respected, rate-limited. Apify only
-  runs vetted scrapers, under a per-run cap and a monthly budget.
+- **A guard** (a Claude Code hooks module, tested): no money movement, no banking, payment or crypto
+  sites, no messages to anyone but you (no email, no raw chat APIs), no reading your secrets, your own
+  browsers' sign-ins, your mail or messages, no editing the kit, its registry or the guard, no running
+  Orbit's own controls, no nested Claude runs. Card numbers and IBANs are masked before the model sees them.
+  These are rules the guard checks on every action, not a wall: an agent tricked by a web page into
+  disguising what it runs could get past them. If you'd rather have the wall on Mac, Linux or WSL,
+  `orbit sandbox on` brings back the OS sandbox (macOS's own on a Mac; bubblewrap on Linux and in WSL):
+  shell commands then reach only the sites you approve and can't read your Documents, Desktop, Downloads
+  or a colleague's folder. Native Windows keeps its MXC wall on in either setting.
+- **Their own browser window, never yours:** each crew member's Chrome has its own profile. You sign it in
+  where it needs to be; it never types a password, and your Chrome, Safari, mail and messages stay yours.
+- **Gateways for the open web:** the page reader, the headless browser, Apify and the watchers enforce their
+  own rules: public http(s) pages only (never your computer or your local network), read-only, no logins,
+  no form filling, robots.txt respected, rate-limited. Apify only runs vetted scrapers, under a per-run cap
+  and a monthly budget.
 - **Content is data, not orders:** pages, posts, PDFs and transcripts can't instruct an employee.
   Attempts get logged.
 - **Your switches, not rules you can't change:** each crew member's Manage tab has **Full autonomy**
   (does the whole job without asking: any website, installs its own tools, studies videos, finishes the
-  work; the sandbox keeps it in its own folder) and **Acts in your browser** (posts and uploads in your
-  own Chrome on the sites you pick: ask each time, once per batch, or don't ask). Flip them in the panel,
+  work) and **Posts for you** (posts and uploads from its own browser window on the sites you pick: ask
+  each time, once per batch, or don't ask). Flip them in the panel,
   by typing in chat ("Suoo full autonomy on", "Suoo can post on YouTube without asking", "connect Suoo
   with Nora"), or with one click: when a crew member needs more access in a Claude session, a Yes/No
   button appears there. Orbit flips the switch, never the crew member itself, so a web page can't talk
@@ -330,6 +339,9 @@ orbit routine <h> <job>          run one of their routines now
 orbit chat <h>                   their conversation in a terminal, right here
 orbit inbox [<h>] [--all]        what they said that you haven't seen
 orbit run <h> "message"          one message, one answer, in the terminal
+orbit browser [<h> [site|close|private on|off]]   their own browser window: sign them in there
+orbit sandbox [on|off]           optional OS sandbox (off by default; native Windows MXC stays on)
+orbit sandbox mxc|wsl2           Windows containment mode
 orbit secret telegram|slack|discord|apify|anthropic
 orbit group <chat id> [--channel telegram|slack|discord]   the team chat
 ```
@@ -347,6 +359,8 @@ orbit group <chat id> [--channel telegram|slack|discord]   the team chat
   (`wsl --install`), and inside it Claude Code and `setup-linux.sh`.
 - **Linux:** Ubuntu 22.04+, Debian 12+ or Fedora, Claude Code, and `setup-linux.sh` (bubblewrap, socat,
   ffmpeg, tesseract, a compiler). Voice notes: `orbit doctor --get-whisper --get-voice-model`.
+- Everywhere, for each crew member's own browser window: Google Chrome (or the Chromium the installer adds) and
+  [Node.js](https://nodejs.org) 20 or newer.
 - Everywhere, optional: a bot on Telegram, Slack or Discord ([docs/channels.md](docs/channels.md)), an Apify token.
   Cloud Shift, if you use it, separately needs a qualifying Claude account eligible for cloud sessions.
 
@@ -355,7 +369,8 @@ orbit group <chat id> [--channel telegram|slack|discord]   the team chat
 ```
 ~/orbit/                 the kit (this repository; update with git pull)
   orbit                      the command (`staff` still works)
-  core/engine.py             runs one employee turn in its running conversation: claude -p + sandbox + guard + abilities
+  core/engine.py             runs one employee turn in its running conversation: claude -p + guard + abilities
+  core/browser.py            each crew member's own Chrome window (Playwright's MCP server, connected to it)
   core/staffd.py             the service: chat channels, routines, reminders, team bus, control panel
   core/channels/             one adapter per chat channel (telegram, slack, discord)
   core/abilities.json        the ability catalog (what the checkboxes mean)

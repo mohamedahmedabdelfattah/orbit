@@ -19,6 +19,9 @@
   orbit chat <handle>              their running conversation in a terminal, right here (no Claude app needed)
   orbit inbox [<handle>] [--all]   what your crew said that you haven't seen (reports, results, answers)
   orbit run <handle> "<message>"   one message, one answer, in the terminal
+  orbit browser [<handle> [<site> | close | private on|off]]   their own browser window: sign them in there
+  orbit browser --install          install the connector their browser windows use (free, ~20 MB)
+  orbit sandbox [on|off]           the optional OS sandbox (off by default; native Windows MXC stays on)
   orbit secret telegram | slack | discord | apify | anthropic    save a token (typed hidden, stored only on this computer)
   orbit group <chat id> [--channel telegram|slack|discord]      use a group or channel as the team chat
   orbit roles list | save <handle> [title] | export <role> [folder] | import <folder>   roles you can hire from
@@ -131,6 +134,9 @@ def checks():
     out.append((ok, msg, True))
     out.extend(platform_checks())
     out.append((bool(shutil.which("git")), "git", True))
+    import browser
+    ok, why = browser.ready()
+    out.append((ok, "each crew member's own browser window%s" % ("" if ok else ": " + why), False))
     for mod, why in (("requests", "page reader"), ("bs4", "page reader"), ("playwright", "headless browser")):
         try:
             __import__(mod)
@@ -166,10 +172,11 @@ def checks():
 
 
 def platform_checks():
-    """The computer itself: macOS, native Windows (the MXC runtime), or Windows/Linux with the sandbox's
-    two helpers (bubblewrap, socat). Every must-fix names its fix (SC5); native fixes are native."""
+    """The computer itself: macOS, native Windows (the MXC runtime), or Windows/Linux; with the team's
+    sandbox on (`orbit sandbox on`), its two helpers there (bubblewrap, socat). Every must-fix names
+    its fix (SC5); native fixes are native."""
     if osinfo.KIND == "mac":
-        return [(True, "macOS (the sandbox and the service)", True)]
+        return [(True, "macOS" + (" (the sandbox and the service)" if engine.sandboxed() else ""), True)]
     if osinfo.KIND == "windows":
         import mxc
         info = mxc.mode_info()
@@ -187,11 +194,15 @@ def platform_checks():
     setup = "run once, it asks your password:  sudo sh %s/setup-linux.sh" % KIT
     if osinfo.KIND == "wsl":
         wsl1 = os.uname().release.endswith("-Microsoft")      # WSL 1's kernel name; WSL 2's says microsoft-standard
-        out.append((not wsl1, "Windows, through WSL 2%s" % (
+        bad = wsl1 and engine.sandboxed()
+        out.append((not bad, "Windows, through WSL%s" % (
             (": this is WSL 1, which can't sandbox. In PowerShell run  wsl --set-version %s 2"
-             % (osinfo.distro() or "Ubuntu")) if wsl1 else ""), True))
+             % (osinfo.distro() or "Ubuntu")) if bad else ""), True))
     else:
         out.append((True, "Linux", True))
+    found = osinfo.which("tesseract")
+    if not engine.sandboxed():
+        return out + [(bool(found), "tesseract (reading scans and photos)%s" % ("" if found else ": " + setup), False)]
     miss = [b for b in ("bwrap", "socat") if not osinfo.which(b)]
     out.append((not miss, "the sandbox (bubblewrap, socat)%s" % ((": missing %s, %s" % (", ".join(miss), setup)) if miss else ""), True))
     try:
@@ -957,6 +968,85 @@ def chat(handle, show=False):
 
 
 # ------------------------------------------------------------------ main
+def browser_cmd(args):
+    """orbit browser: each crew member's own Chrome window, apart from yours (core/browser.py)."""
+    import browser
+    if args.install:
+        try:
+            say("The browser connector (%s %s) is installed." % (browser.PKG, browser.install()))
+        except browser.BrowserError as e:
+            sys.exit(str(e))
+        if not args.handle:
+            return
+    reg = engine.registry().get("employees", {})
+    if not args.handle:
+        ok, why = browser.ready()
+        say("Each crew member has a browser window of its own." if ok else "Not ready on this computer: %s." % why)
+        for eid, e in sorted(reg.items()):
+            if e.get("status") != "retired":
+                st = browser.status(eid)
+                say("  %-14s %s%s" % (eid, "open" if st["running"] else "closed", ", private" if st["private"] else ""))
+        return
+    if args.handle not in reg:
+        sys.exit("No crew member %r. `orbit list` shows their handles." % args.handle)
+    name = reg[args.handle].get("name", args.handle)
+    rest = args.rest
+    try:
+        if rest[:1] == ["close"]:
+            say(("Closed %s's browser. Its tabs and sign-ins come back next time." % name) if browser.close(args.handle)
+                else "%s's browser wasn't open." % name)
+        elif rest[:1] == ["private"]:
+            if rest[1:2] not in (["on"], ["off"]):
+                sys.exit("orbit browser %s private on|off" % args.handle)
+            on = browser.set_private(args.handle, rest[1] == "on", owner_name() or "owner")
+            say(("%s's browser now starts fresh every time, like incognito: it forgets sign-ins when it closes." if on else
+                 "%s's browser keeps its tabs and sign-ins again.") % name)
+        else:
+            r = browser.open_tab(args.handle, rest[0] if rest else "")
+            say("%s's own browser window is open%s. Sign them in there; they stay signed in. Your own Chrome isn't touched."
+                % (name, " on " + r["url"] if rest else ""))
+    except browser.BrowserError as e:
+        sys.exit("Couldn't open %s's browser: %s" % (name, e))
+
+
+def say_sandbox_status():
+    say("The optional team sandbox is %s. `orbit sandbox %s` turns it %s." % (
+        ("on", "off", "off") if engine.sandboxed() else ("off", "on", "on")))
+    if osinfo.KIND == "windows" and engine.recorded_sandbox_mode() == "mxc":
+        say("Native Windows MXC containment stays on for every shell command in either setting.")
+
+
+def sandbox_change_summary(state):
+    if state == "on":
+        return ("Shell commands reach only the sites you approve and stay out of your Documents, Desktop and "
+                "Downloads; their own browser windows still work.")
+    if osinfo.KIND == "windows" and engine.recorded_sandbox_mode() == "mxc":
+        return ("Native Windows MXC containment stays on for every shell command; the guard still keeps money, "
+                "passwords, your secrets and your own browser off-limits.")
+    return ("They work on this computer freely, each in its own browser window; the guard still keeps money, "
+            "passwords, your secrets and your own browser off-limits.")
+
+
+def sandbox_cmd(state):
+    """Change the optional team sandbox; native-Windows MXC containment remains mandatory."""
+    if state is None:
+        return say_sandbox_status()
+    reg = engine.registry()
+    if state == "on":
+        reg["sandbox"] = True
+    else:
+        reg.pop("sandbox", None)
+    engine.save_registry(reg, "sandbox %s" % state)
+    for eid, e in reg.get("employees", {}).items():
+        if e.get("status") != "retired":
+            try:
+                engine.claude_session(eid)                  # their Claude chats follow too
+            except Exception as ex:  # noqa: BLE001
+                say("  %s's Claude chat settings: %s" % (eid, ex))
+    say("The optional team sandbox is %s from their next run and in their Claude chats. %s" %
+        (state, sandbox_change_summary(state)))
+
+
 def main():
     ap = argparse.ArgumentParser(prog="orbit", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
@@ -988,6 +1078,11 @@ def main():
     a.add_argument("--on", default=""); a.add_argument("--off", default="")
     r = sub.add_parser("run")
     r.add_argument("handle"); r.add_argument("message")
+    bw = sub.add_parser("browser")                       # a crew member's own browser window
+    bw.add_argument("handle", nargs="?"); bw.add_argument("rest", nargs="*")
+    bw.add_argument("--install", action="store_true", help="install the connector the browser windows use")
+    sb = sub.add_parser("sandbox")
+    sb.add_argument("target", nargs="?", choices=["on", "off", "mxc", "wsl2"])
     sub.add_parser("desk").add_argument("--show", action="store_true", help="print the link instead of opening it")
     o = sub.add_parser("open")
     o.add_argument("handle"); o.add_argument("--show", action="store_true", help="print the link instead of opening it")
@@ -1008,8 +1103,6 @@ def main():
     s.add_argument("name", choices=sorted(SECRET_NAMES))
     g = sub.add_parser("group")
     g.add_argument("chat_id"); g.add_argument("--channel", choices=["telegram", "slack", "discord"])
-    sb = sub.add_parser("sandbox")
-    sb.add_argument("mode", choices=["mxc", "wsl2"])
     args = ap.parse_args()
 
     if args.cmd in (None, "help"):
@@ -1018,7 +1111,9 @@ def main():
     if args.cmd == "setup":
         return setup(no_start=args.no_start)
     if args.cmd == "sandbox":
-        return sandbox_switch(args.mode)
+        if args.target in ("mxc", "wsl2"):
+            return sandbox_switch(args.target)
+        return sandbox_cmd(args.target)
     if args.cmd == "demo":
         return demo(stop=args.stop)
     if args.cmd == "start":
@@ -1119,6 +1214,8 @@ def main():
             say(("✓ " if ok else ("✗ " if must else "· ")) + msg)
             bad += (not ok and must)
         sys.exit(1 if bad else 0)
+    if args.cmd == "browser":
+        return browser_cmd(args)
     if args.cmd == "desk":
         import desk
         if args.show:
