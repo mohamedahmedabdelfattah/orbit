@@ -12,7 +12,17 @@ import tempfile
 
 
 def _rmtree(path: str):
-    """Delete a tree even where git left read-only loose objects (Windows can't unlink those as-is)."""
+    """Delete a tree (or a single file) even where git left read-only loose objects
+    (Windows can't unlink those as-is)."""
+    if os.path.isfile(path) or os.path.islink(path):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+        except OSError:
+            pass
+        os.remove(path)
+        return
+    if not os.path.exists(path) and not os.path.isjunction(path):
+        return
     def force(func, p, _exc):
         os.chmod(p, stat.S_IWRITE)
         func(p)

@@ -59,6 +59,59 @@ Logs: `C:\Users\Mohamed\AppData\Local\Temp\opencode\orbit-final-logs\<module>.lo
 
 Recorded: 2026-11-11. Zero leaked temp roots after the final runs (before/after residue inventory).
 
+## Representative smoke flows (T092 / SC-006)
+
+Executed against the recorded merge's production sources: since commit `62552d6d33cb40a07abfd338f5775a5bd604158e`
+only `specs/004-safe-upstream-merge/**` files changed, so the production tree these flows exercised is exactly the
+recorded candidate tree `8448419bfc0790ed74379145222ff2aa51850c1a`. Interpreter: the disposable dependency-complete
+virtual environment `C:\Users\Mohamed\AppData\Local\Temp\opencode\orbit-validate-venv\Scripts\python.exe`, with
+`PYTHONUTF8=1`. Disposable profile/environment: `STAFFROOM_HOME` pointed at a fresh temp dir for every run; `claude`
+resolved to the deterministic fake driver (`tests/fake_claude.py`) launched through a compiled `claude.exe` shim (see
+host findings below); no real Claude, no network, no owner data. Transcript:
+`C:\Users\Mohamed\AppData\Local\Temp\opencode\orbit-smoke-transcript.txt`.
+
+| Flow | Step | Status | Observed |
+| --- | --- | --- | --- |
+| Setup/status | `orbit setup --no-start` (the real flow; piped answers) | fail | Blocks forever at the interactive Telegram-token `getpass`; killed by tree at 240 s; evidence-only blocker (below) |
+| Setup/status | Disposable-home init replicating setup's post-gate engine calls (registry owner `local-alex`/`Alex`, team `Smoke Team`, `team/ABOUT.md`) | pass | Home initialized; the blocked interactive setup never reached this stage, so the harness performed the identical engine calls it performs after its checks |
+| Setup/status | `orbit status` | pass | "Service: stopped (`orbit start`)" |
+| Setup/status | `orbit list` | pass | exit 0; empty registry prints nothing |
+| Ordinary crew work | `orbit hire --name Tess --role "Research assistant" --scope … --supervisor Alex` | pass | "Hired Tess: /tess. They start within a minute." |
+| Ordinary crew work | `orbit run tess "Say hello and list what you can do for me."` (turn 1) | pass | The fake's reply returned verbatim; fake's `calls.jsonl` shows the full contained argv (MXC PreToolUse hook, sandbox blob, denied tools) |
+| Main conversation | `orbit run tess "And what files do you see in your workspace?"` (turn 2) | pass | Reply returned; same running conversation (continuity below) |
+| Main conversation | `orbit chat tess --show` | pass | Prints the interactive claude command for the same session (`--resume <session id>`, hook and sandbox settings visible) |
+| Report delivery/unread | Report job delivery via the report path's `team.feed('tess', 'Tess', owner, …, 'job')` | pass | Delivered to owner Alex |
+| Report delivery/unread | `orbit status` | pass | "New from your crew: 1 (orbit inbox)" (the unread banner is printed by `status`, not `list`) |
+| Report delivery/unread | `orbit inbox` | pass | Shows the report ("End of day: smoke report delivered."); marks it seen |
+| Report delivery/unread | `orbit status` after inbox | pass | Unread banner gone |
+| Report delivery/unread | `orbit inbox --all` | pass | Report shown again from history |
+| Owner desk | `orbit desk --show` | pass | `claude://code/new?folder=…desk&q=…` link printed |
+| Owner desk | `orbit open tess --show` | pass | Exact gate refusal: "Crew member Desktop sessions aren't available on this native Windows PC yet. Use `orbit chat <handle>` for a contained terminal conversation." |
+
+Conversation continuity (the fake's own recording, `calls.jsonl`): exactly 2 conversation calls; call 1 carries
+`--session-id <uuid>`, call 2 carries `--resume <the same uuid>`; `employees/tess/state/sessions.json` remembers `main`.
+Cleanup proof: disposable home removed, fake-claude dir removed, zero temp/probe residue afterwards, and the real
+`~/Staff` was never created or touched.
+
+Host findings recorded as evidence only — production stays untouched so the recorded tree and all bound evidence remain
+valid; these feed the REL1 real-host blocker list:
+
+1. Setup blocker: `orbit setup` blocks forever at the interactive Telegram-token `getpass` (orbit, setup flow). The
+   prompts before it consume piped answers normally, then `getpass.getpass` on Windows reads the console
+   (`msvcrt.getwch`) and can never proceed when stdin is piped. Reproduced three times (600 s, 420 s, 240 s kills,
+   unbuffered `-u` showing the exact stall point). A real-host/CI run needs a TTY or a secret-skip path.
+2. Claude `.BAT` spawn: `engine.stream` spawning the fake through `claude.bat` fails with cmd.exe's "The filename,
+   directory name, or volume label syntax is incorrect." CreateProcess routes a `.BAT` through `cmd.exe /c`, whose
+   quoting mangles the inline-JSON `--settings` value (`settings_json`, core/engine.py). Bisected: dropping only
+   `--settings` makes the same `.BAT` spawn succeed; the guard probe's simple `claude --version` spawn succeeds. A
+   real npm-style `claude.cmd` shim install would hit the same path; the smoke harness therefore launches the fake
+   through a compiled `claude.exe` shim that forwards argv verbatim. Feeds REL1 real-host blockers.
+3. `mxc.probe()` on this host: discovery ok (`vendor\mxc\wxc-exec.exe`), verdict `usable` in 2.1 s (Windows build
+   10.0.26300 ≥ the updated-24H2 gate); all probe cases (positive write, outside-write, denied read, network, timeout)
+   behaved as designed on the real sandbox runtime.
+4. Minor pre-existing UX gap observed: `orbit open <unknown-handle>` raises a KeyError traceback instead of an
+   owner-readable line (`engine.employee` used directly rather than the crew-member lookup).
+
 ## Implementation diagnostics (pre-binding history)
 
 | Check | Observed result | Artifact |
@@ -110,6 +163,7 @@ Recorded: 2026-11-11. Zero leaked temp roots after the final runs (before/after 
 | `E-X1-WSL2` | `X1` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | wsl2 | Ubuntu 24.04 under WSL2 workflow job | pending | No candidate-bound remote CI run | workflow URL pending | 2026-11-11 | cross_platform |
 | `E-REL1-BLOCKED` | `REL1` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | not_applicable | Feature-003 implementation/readiness inspection | fail | Required implementation/harness/workflows/evidence validator absent; known P0 paths remain | feature-003 plans and source inspection | 2026-11-11 | product_release |
 | `E-PUB1-HOLD` | `PUB1` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | not_applicable | Publication decision | pending | `hold_local`; remote still at reviewed `da644db` per read-only `ls-remote`; no remote write authorized | `publication-options.md` | 2026-11-11 | publication |
+| `E-SC6-FLOWS` | `SC-006` | `8448419bfc0790ed74379145222ff2aa51850c1a` | host | Five representative smoke flows in a disposable profile/environment (T092; completes T074) | pass | 14 of 15 steps `pass`; setup `fail` (Telegram-token `getpass` blocker, evidence-only); conversation continuity (`--session-id` → `--resume`, same id) and cleanup proven | `orbit-smoke-transcript.txt` | 2026-11-11 | integration |
 
 ## Release Compatibility Record (T076)
 

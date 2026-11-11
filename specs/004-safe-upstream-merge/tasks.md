@@ -322,3 +322,9 @@ Task T060: Add the guard plugin CI invocation in .github/workflows/tests.yml.
 - Do not use historical feature-001/002 outputs as passes for the merged tree.
 - Do not restore `engine.online`/`wait_online`, strip `CLAUDE_CONFIG_DIR`, broaden PowerShell permissions, or allow native employee Desktop sessions to make tests pass.
 - Do not delete `backup-before-sync` during this task list.
+
+---
+
+## Phase 8: Convergence
+
+- [x] T092 Execute the five representative smoke flows (setup/status, ordinary crew work, a main conversation, report delivery/unread, and owner desk) in a disposable profile/environment against candidate tree `8448419bfc0790ed74379145222ff2aa51850c1a`, and record each exact `pass|fail|pending|not_applicable` result plus cleanup proof in `specs/004-safe-upstream-merge/evidence/validation-results.md` per SC-006 and task T074 (partial)
