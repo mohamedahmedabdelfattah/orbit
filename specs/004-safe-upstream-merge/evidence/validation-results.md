@@ -7,7 +7,7 @@
 | Candidate ID | `orbit-v0.12.0-merge-001` |
 | State | `validated_local` |
 | Candidate tree | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` |
-| Candidate revision | Empty; recorded locally in US4 (T084) |
+| Candidate revision | `62552d6d33cb40a07abfd338f5775a5bd604158e` (recorded locally in US4/T084) |
 | Local baseline | `366cf73e7e8f4e62e3604613097a00bafab087df` / tree `323afbf24aa42ed55be78d924a6a6da3d2cbfadc` — `verified` |
 | Upstream baseline | `256ed1626941982d22c5aee7305f5ed3f9852dc4` (v0.12.0) / tree `34c5b3d9c3bccd121d694f0d14adae8c2dff0538` — `verified` |
 | Semantic base | `500d772ae751651c5b6d1f0e2776e7dd5fd3d834` / tree `8f95d0d3a96f3e0c952cf47a293faee69cdee490` — `verified` |
@@ -34,7 +34,7 @@ staging; the delta is proven evidence-only in `history-proof.md`.
 | `I5` | `pass` | integration | Six modules in separate processes, 298 tests, only documented dependency/platform skips, zero residue |
 | `G1` | `pending` | cross_platform | `claude` CLI absent on this host; official `claude plugin test` runs in CI after installation; no pass inferred |
 | `D1` | `pass` | integration | Source-backed docs review: zero contradictions remain |
-| `H1` | `pending` | integration | Merge not yet recorded; T080 recovery rehearsal already passed |
+| H1 | `pass` | integration | Merge recorded `62552d6d33cb40a07abfd338f5775a5bd604158e` (tree `8448419b…` = pre-commit staged T2); replacement removed; recovery rehearsal passed (T080) |
 | `X1` | `pending` | cross_platform | Candidate-bound macOS/Linux/native-Windows/WSL2 CI requires an owner-approved remote action |
 | `REL1` | `blocked` | product_release | Feature-003 implementation and required real-host evidence absent |
 | `PUB1` | `pending` | publication | `hold_local`; no remote write authorized |
@@ -103,7 +103,7 @@ Recorded: 2026-11-11. Zero leaked temp roots after the final runs (before/after 
 | `E-I5-CLEANUP` | `I5` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | host | Temp/recorder/transcript/live-data cleanup | pass | Zero residue before/after the final runs; 254 stale roots purged after the fix | `verify_candidate.py tests` session record | 2026-11-11 | integration |
 | `E-G1-GUARD` | `G1` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | host | `claude plugin test` from guard plugin | pending | CLI missing on this host; no pass inferred. CI invokes the official runner after Claude Code installation and asserts exactly ten cases | `.github/workflows/tests.yml` | 2026-11-11 | cross_platform |
 | `E-D1-DOCS` | `D1` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | host | Source-backed README/SETUP/PRODUCT/workflow review | pass | Version 0.12.0 stated; Desktop gating and blocked release status honest; connection/cost/account wording matches source; zero contradictions found in the final review | `test_core.log` (`StaticContracts`); `test_platforms.log` (docs matrix) | 2026-11-11 | integration |
-| `E-H1-HISTORY` | `H1` | pending merge record | host | Two-parent/tree/replacement-free/recovery proof | pending | Recovery rehearsal passed (T080); merge recording is US4 | `history-proof.md` | 2026-11-11 | integration |
+| `E-H1-HISTORY` | `H1` | `8448419bfc0790ed74379145222ff2aa51850c1a` | host | Two-parent/tree/replacement-free/recovery proof | pass | Merge `62552d6d33cb40a07abfd338f5775a5bd604158e` with parents `366cf73…` + `256ed16…`; recorded tree equals staged T2; identity stable under `GIT_NO_REPLACE_OBJECTS=1`; replacement removed; both inputs ancestors; `SAFE_MERGE_HISTORY_OK` | `history-proof.md`; `verify_candidate.py history` | 2026-11-11 | integration |
 | `E-X1-MACOS` | `X1` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | macos | macOS workflow job | pending | No candidate-bound remote CI run | workflow URL pending | 2026-11-11 | cross_platform |
 | `E-X1-LINUX` | `X1` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | linux | Ubuntu 24.04 workflow job | pending | No candidate-bound remote CI run | workflow URL pending | 2026-11-11 | cross_platform |
 | `E-X1-WINDOWS` | `X1` | `e90f3edf3a94a29d4c6a47b233a32ff7606e2367` | windows_unit | Native-Windows workflow job | pending | Local host evidence passes; exact candidate workflow run absent | workflow URL pending | 2026-11-11 | cross_platform |

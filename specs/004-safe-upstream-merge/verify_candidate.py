@@ -207,7 +207,14 @@ def evidence():
 
 
 def history():
-    commit = git("rev-parse", "HEAD")
+    merge = None
+    for line in git("log", "--format=%H %P", "HEAD").splitlines():
+        fields = line.split()
+        if len(fields) == 3 and fields[1:] == [LOCAL, UPSTREAM]:
+            merge = fields[0]
+            break
+    assert merge, "recorded merge with parents %s + %s is not on HEAD's ancestry" % (LOCAL, UPSTREAM)
+    commit = merge
     fields = git("show", "-s", "--format=%H %T %P", commit).split()
     assert len(fields) == 4, fields
     assert fields[2:] == [LOCAL, UPSTREAM], fields
