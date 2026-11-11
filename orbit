@@ -6,12 +6,19 @@
   orbit start | stop | restart     the background service (starts when you log in)
   orbit status                     is it running, who works here
   orbit panel                      open the control panel in your browser
-  orbit hire --name Sara --role "Market researcher" --scope "…" [--super] [--model sonnet]
+  orbit hire --name Sara --role "Market researcher" --scope "…" [--super] [--brain opus] [--model sonnet]
+  orbit hire --guide | --card <file.json>   the hiring interview's rules, or hire from the card it produced
+  orbit set <handle> brain|model|effort|scope|role|supervisor|weekly_tokens <value>
+  orbit routine <handle> <standup|eod|…>   run one of their routines now
   orbit list
   orbit pause | resume | retire <handle>
   orbit abilities <handle> [--default | --super | --on a,b --off c]
   orbit skills [<handle>] [--share NAME | --remove NAME | --export NAME DIR]   what they learned
-  orbit run <handle> "<message>"   talk to someone right here in the terminal
+  orbit desk                       Orbit's own chat in the Claude app: hire, check and change your crew by talking
+  orbit open <handle>              their own chat in the Claude app (the first time, press Enter once there)
+  orbit chat <handle>              their running conversation in a terminal, right here (no Claude app needed)
+  orbit inbox [<handle>] [--all]   what your crew said that you haven't seen (reports, results, answers)
+  orbit run <handle> "<message>"   one message, one answer, in the terminal
   orbit secret telegram | slack | discord | apify | anthropic    save a token (typed hidden, stored only on this computer)
   orbit group <chat id> [--channel telegram|slack|discord]      use a group or channel as the team chat
   orbit roles list | save <handle> [title] | export <role> [folder] | import <folder>   roles you can hire from
@@ -386,12 +393,34 @@ def systemd_user():
         return False
 
 
+def pid_alive(pid: int) -> bool:
+    """Is that process still running? POSIX probes with signal 0. Windows must not: `os.kill(pid, 0)`
+    terminates the process there, so liveness goes through OpenProcess/GetExitCodeProcess instead."""
+    if osinfo.KIND != "windows":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid)            # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+            return False
+        return code.value == 259                       # STILL_ACTIVE
+    finally:
+        k32.CloseHandle(h)
+
+
 def service_pid():
     try:
         with open(SERVICE_PID) as fh:
             pid = int(fh.read().strip())
-        os.kill(pid, 0)
-        return pid
+        return pid if pid_alive(pid) else None
     except (OSError, ValueError):
         return None
 
@@ -797,7 +826,8 @@ def demo(stop=False):
     try:
         with open(pidf) as fh:
             pid = int(fh.read().strip())
-        os.kill(pid, 0)
+        if not pid_alive(pid):
+            pid = None
     except (OSError, ValueError):
         pid = None
     if stop:
@@ -840,6 +870,92 @@ def demo(stop=False):
     osinfo.open_url(u)
 
 
+# ------------------------------------------------------------------ talking to the crew, right here
+def owner_name():
+    return next(iter(engine.registry().get("owners", {}).values()), {}).get("name", "Owner")
+
+
+def crew_member(handle):
+    emps = engine.registry().get("employees", {})
+    if handle not in emps or emps[handle].get("status") == "retired":
+        sys.exit("No such crew member: %s (orbit list)" % handle)
+    return engine.employee(handle)
+
+
+def show_messages(rows):
+    for r in rows:
+        say("── %s · %s" % (r.get("from_name", "?"), str(r.get("ts", ""))[:16]))
+        say(str(r.get("body", "")).strip())
+        say()
+
+
+def inbox(handle=None, show_all=False):
+    """What the crew said that you haven't seen: the team room, filtered to messages for you. Marks them seen."""
+    import team
+    if handle:
+        crew_member(handle)
+    me = owner_name()
+    if show_all:
+        emps = engine.registry().get("employees", {})
+        rows = [r for r in team.tail(team.FEED, 400) if r.get("from_id") in emps and (not handle or r.get("from_id") == handle)][-20:]
+    else:
+        rows = team.unread(me, handle)
+    if len(rows) > 15 and not show_all:
+        say("%d new messages; the last 15 are below, all of them in the control panel (orbit panel)." % len(rows))
+        say()
+        rows = rows[-15:]
+    if rows:
+        show_messages(rows)
+    else:
+        say("Nothing new from %s." % (engine.employee(handle)["name"] if handle else "your crew"))
+    team.mark_seen(me, handle)                         # filtered view: only that employee's cursor
+    return rows
+
+
+def chat(handle, show=False):
+    """A Claude window on the crew member's own running conversation: the same session its routines, follow-ups and
+    your messages run in, so everything it did and said is there and what you say there it remembers. While the
+    window is open its routines wait (20 minutes idle and they carry on); while a routine runs, the window waits."""
+    import team
+    emp = crew_member(handle)
+    ws = emp["workspace"]
+    me = owner_name()
+    try:
+        w = engine.chat_window(emp)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if show:
+        say(osinfo.display_argv(w["cmd"]))
+        return
+    rows = team.unread(me, handle)
+    if rows:
+        say("While you were away, %s said:" % emp["name"])
+        say()
+        show_messages(rows)
+        team.mark_seen(me, handle)                     # this window is that employee's view, not the room
+    b = engine.busy(ws)
+    if b:
+        say("%s is in the middle of %s (since %s). Your window opens when it's done; Ctrl-C to stop waiting."
+            % (emp["name"], team.LABELS.get(b.get("job"), b.get("job") or "a run"), str(b.get("since", ""))[11:16]))
+        try:
+            while engine.busy(ws):
+                time.sleep(3)
+        except KeyboardInterrupt:
+            say()
+            return
+        w = engine.chat_window(emp)                        # the run may have moved the conversation on
+    engine.remember_session(ws, engine.SESSION, w["sid"])
+    engine.mark(ws, "chat", who=me)
+    say("%s's conversation%s. Their routines wait while this window is open (20 minutes idle and they carry on). "
+        "Leave with Ctrl-D or /exit." % (emp["name"], " starts fresh (the files carry the memory)" if w["new"] else ", continued"))
+    try:
+        subprocess.call(w["cmd"], cwd=ws, env=w["env"])
+    except KeyboardInterrupt:
+        pass
+    finally:
+        engine.unmark(ws, "chat")
+
+
 # ------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(prog="orbit", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -859,9 +975,12 @@ def main():
     d.add_argument("--get-whisper", action="store_true")
     d.add_argument("--audit", action="store_true")
     h = sub.add_parser("hire")
-    h.add_argument("--name", required=True); h.add_argument("--role", required=True); h.add_argument("--scope", default="")
+    h.add_argument("--name"); h.add_argument("--role"); h.add_argument("--scope", default="")
+    h.add_argument("--guide", action="store_true", help="print the hiring interview's rules, jobs, abilities and card format")
+    h.add_argument("--card", metavar="FILE", help="hire from a card the interview produced (JSON)")
     h.add_argument("--supervisor", default=""); h.add_argument("--handle"); h.add_argument("--super", action="store_true")
-    h.add_argument("--model", choices=["opus", "sonnet", "haiku"])
+    h.add_argument("--model", choices=["opus", "sonnet", "haiku"], help="the hands: production runs (default sonnet)")
+    h.add_argument("--brain", choices=["opus", "sonnet", "haiku"], help="the brain: standup, reviews, chats (default opus)")
     for c in ("pause", "resume", "retire"):
         sub.add_parser(c).add_argument("handle")
     a = sub.add_parser("abilities")
@@ -869,6 +988,19 @@ def main():
     a.add_argument("--on", default=""); a.add_argument("--off", default="")
     r = sub.add_parser("run")
     r.add_argument("handle"); r.add_argument("message")
+    sub.add_parser("desk").add_argument("--show", action="store_true", help="print the link instead of opening it")
+    o = sub.add_parser("open")
+    o.add_argument("handle"); o.add_argument("--show", action="store_true", help="print the link instead of opening it")
+    st = sub.add_parser("set")
+    st.add_argument("handle"); st.add_argument("field"); st.add_argument("value", nargs="?", default="")
+    rt = sub.add_parser("routine")
+    rt.add_argument("handle"); rt.add_argument("job")
+    od = sub.add_parser("order")                         # any panel order, for Orbit's chat: orbit order <kind> '<json>'
+    od.add_argument("kind"); od.add_argument("payload", nargs="?", default="{}")
+    c = sub.add_parser("chat")
+    c.add_argument("handle"); c.add_argument("--show", action="store_true", help="print the command instead of opening the window")
+    i = sub.add_parser("inbox")
+    i.add_argument("handle", nargs="?"); i.add_argument("--all", action="store_true", help="the last 20, seen or not")
     k = sub.add_parser("skills")
     k.add_argument("handle", nargs="?"); k.add_argument("--share", metavar="NAME"); k.add_argument("--remove", metavar="NAME")
     k.add_argument("--export", nargs=2, metavar=("NAME", "DIR"))
@@ -987,6 +1119,35 @@ def main():
             say(("✓ " if ok else ("✗ " if must else "· ")) + msg)
             bad += (not ok and must)
         sys.exit(1 if bad else 0)
+    if args.cmd == "desk":
+        import desk
+        if args.show:
+            say(desk.link()[0])
+            return
+        r = desk.open_chat()
+        if not r["opened"]:
+            say(r["link"])
+        say(("Orbit's chat is opening in the Claude app." + (" Press Enter there once: it sets itself up." if r["new"] else ""))
+            if r["opened"] else "Open that link on this computer's Claude app (needs the Claude desktop app).")
+        return
+    if args.cmd in ("set", "routine", "order"):
+        import desk
+        try:
+            if args.cmd == "set":
+                say(desk.order("set_field", {"employee_id": args.handle, "field": args.field, "value": args.value}))
+            elif args.cmd == "routine":
+                say(desk.order("run_job", {"employee_id": args.handle, "job": args.job}))
+            else:
+                try:
+                    payload = json.loads(args.payload)
+                except ValueError:
+                    sys.exit("The order's details must be JSON, like '{\"employee_id\": \"sara\"}'")
+                if not isinstance(payload, dict):
+                    sys.exit("The order's details must be a JSON object")
+                say(desk.order(args.kind, payload))
+        except RuntimeError as e:
+            sys.exit(str(e))
+        return
     if args.cmd == "panel":
         u = panel_url()
         say(u)
@@ -1015,16 +1176,51 @@ def main():
     if args.cmd in ("status", "list"):
         if args.cmd == "status":
             say("Service: %s" % ("running" if running() else "stopped (`orbit start`)"))
+            import team
+            n = len(team.unread(owner_name()))
+            if n:
+                say("New from your crew: %d (orbit inbox)" % n)
         for k, e in engine.registry().get("employees", {}).items():
             if e.get("status") == "retired":
                 continue
             say("/%-12s %-10s %-28s %s · %d abilities" % (k, e["name"], e["role"][:28], e.get("status", "active"), len(abilities.effective(k))))
         return
+    if args.cmd == "hire" and (args.guide or args.card):
+        import desk
+        if args.guide:
+            say(desk.guide())
+            return
+        try:
+            with open(args.card, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            say(desk.hire(payload))
+        except (OSError, ValueError, RuntimeError) as e:
+            sys.exit("Not hired: %s" % e)
+        return
+    if args.cmd == "hire" and not (args.name and args.role):
+        sys.exit("orbit hire --name … --role … (or --guide / --card <file>)")
+    if args.cmd == "open":
+        import claudeapp
+        emp = engine.employee(args.handle)
+        try:
+            engine.require_employee_launch(emp, "desktop")
+            if args.show:
+                s = engine.claude_session(args.handle)
+                say(s.get("chat") or s["link"])
+                return
+            r = claudeapp.open_chat(args.handle)
+        except (KeyError, RuntimeError) as e:
+            sys.exit("Couldn't open their chat: %s (Try `orbit chat %s`.)" % (e, args.handle))
+        if not r["opened"]:
+            say(r["link"])
+        say(("Their chat is opening in the Claude app." + (" Press Enter there once: they set up their routines in it." if r["new_chat"] else ""))
+            if r["opened"] else "Open that link in the Claude app on this computer, or talk here: orbit chat %s" % args.handle)
+        return
     try:
         if args.cmd == "hire":
             ensure_home()
             hd = hire.hire(args.name, args.role, args.scope, supervisor=args.supervisor, emp_id=args.handle,
-                           preset="super" if args.super else "default", model=args.model)
+                           preset="super" if args.super else "default", model=args.model, brain=args.brain)
             say("Hired %s: /%s. They start within a minute." % (args.name, hd))
         elif args.cmd in ("pause", "resume", "retire"):
             hire.set_status(args.handle, {"pause": "paused", "resume": "active", "retire": "retired"}[args.cmd])
@@ -1054,11 +1250,17 @@ def main():
                  "slack": "Team chat set. Invite the bot to that channel: /invite @YourBot.",
                  "discord": "Team chat set. Make sure the bot can view and post in that channel."}[ch])
         elif args.cmd == "run":
-            emp = engine.employee(args.handle)
-            me = next(iter(engine.registry().get("owners", {}).values()), {}).get("name", "Owner")
+            emp = crew_member(args.handle)
+            me = owner_name()
             import team
-            res = engine.run(emp, team.chat_prompt(me, "the terminal", args.message), job="chat", session_key="terminal")
+            res = engine.run(emp, team.chat_prompt(me, "the terminal", args.message), job="chat")   # a turn of its one conversation
+            team.append(team.CHATLOG, {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "who": me, "employee": emp["id"], "channel": "terminal",
+                                       "text": args.message[:4000], "answer": res["text"][:8000]})
             say(res["text"])
+        elif args.cmd == "chat":
+            chat(args.handle, show=args.show)
+        elif args.cmd == "inbox":
+            inbox(args.handle, show_all=args.all)
         elif args.cmd == "skills":
             me = next(iter(engine.registry().get("owners", {}).values()), {}).get("name", "Owner")
             if not args.handle:

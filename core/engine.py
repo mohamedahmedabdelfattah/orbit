@@ -170,11 +170,78 @@ def usage() -> dict:
     return out
 
 
-def pick_model(emp: dict) -> str:
+BRAIN_JOBS = ("chat", "standup", "initiative", "eod", "review", "catchup", "first_day", "minutes", "learn")
+
+
+def pick_model(emp: dict, job: str = "chat") -> str:
+    """Two models per crew member. The **brain** thinks and talks with the owner (standup, initiative, end of day,
+    the weekly review, catching up, chats): Opus by default, the same brain the owner gets in their own Claude.
+    The **hands** do the production runs and the scans (follow-ups, the morning brief, scout, self-test, colleague
+    questions): Sonnet by default. When the owner's plan is nearly used up, both fall back to the light model."""
     u = usage()
     if u.get("five_hour", 0) >= 80 or u.get("seven_day", 0) >= 90:
         return emp.get("fallback_model", "haiku")
+    if job in BRAIN_JOBS:
+        return emp.get("brain") or "opus"
     return emp.get("model", "sonnet")
+
+
+# ------------------------------------------------------------------ one running conversation
+SESSION = "main"              # a crew member is one conversation: routines, follow-ups and every owner's chats land in it
+HEAVY, FULL = 60_000, 150_000  # context tokens: heavy → start fresh on a new day; full → start fresh now
+ORIENT = ("[New conversation. Your memory is in your files: read CLAUDE.md, the handbook, ~/Staff/team/ABOUT.md, PLAN.md, "
+          "STATE.md, TASKS.md and LESSONS.md before you act, then carry on as if you never left.]\n\n")
+
+
+def claude_data_root(env: dict = None) -> str:
+    """Claude Code's data root for the exact child environment. An inherited CLAUDE_CONFIG_DIR is
+    authoritative; the usual ~/.claude is used only when the child environment does not set it. The
+    path is never persisted or logged."""
+    if env is None:
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    return os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or "~/.claude")
+
+
+def transcripts(ws: str, env: dict = None) -> str:
+    """Where Claude Code keeps this folder's session transcripts, under the effective data root."""
+    return os.path.join(claude_data_root(env), "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(ws)))
+
+
+def context_tokens(ws: str, sid: str, env: dict = None) -> int:
+    """How much the conversation carries now: the context size of its last turn, read from Claude Code's own
+    transcript of the session (no model call). 0 when there is no transcript yet."""
+    path = os.path.join(transcripts(ws, env), sid + ".jsonl")
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 400_000))
+            tail = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return 0
+    ctx = 0
+    for line in tail.splitlines():
+        if '"usage"' not in line:
+            continue
+        try:
+            u = ((json.loads(line).get("message") or {}).get("usage")) or {}
+        except (ValueError, AttributeError):
+            continue
+        if u:
+            ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    return ctx
+
+
+def fresh_start(sessions: dict, ws: str, today: str = None, env: dict = None) -> bool:
+    """A conversation runs on while it's light, so the crew member remembers the day and the week like a chat window
+    does. Once it has grown heavy it starts fresh on the next day (the files carry the memory across), and near
+    Claude's context limit it starts fresh at once: no run pays to re-read a week of history."""
+    sid = sessions.get(SESSION)
+    if not sid:
+        return False
+    ctx = context_tokens(ws, sid, env)
+    today = today or time.strftime("%F")
+    return ctx >= FULL or (ctx >= HEAVY and sessions.get(SESSION + "_day") != today)
 
 
 # ------------------------------------------------------------------ launch
@@ -308,6 +375,36 @@ def autonomous(emp: dict) -> bool:
     return "full_autonomy" in abilities.effective(emp["id"])
 
 
+def recorded_sandbox_mode() -> str:
+    """The owner's recorded machine mode. Native Windows defaults to MXC; every other platform uses
+    its existing sandbox/WSL2 path."""
+    mode = (registry().get("platform") or {}).get("sandbox_mode")
+    return mode or ("mxc" if osinfo.KIND == "windows" else "wsl2")
+
+
+def employee_launch_error(emp: dict = None, surface: str = "run") -> str:
+    """One employee machine-mode decision for every launch surface: unattended runs, terminal chat,
+    panel/session opening, Claude-app opening and refresh work. Native Windows recorded as WSL2 may
+    not launch employee work on the Windows side; native employee Desktop sessions stay gated until
+    feature 003. Mac/Linux/actual WSL behavior is unchanged."""
+    if osinfo.KIND != "windows":
+        return ""
+    if recorded_sandbox_mode() == "wsl2":
+        return ("Your crew runs in WSL2 mode: start it inside WSL (the Ubuntu window), not on the "
+                "Windows side. (See docs/SETUP.md, 'Windows through WSL'.)")
+    if surface in ("desktop", "app"):
+        return ("Crew member Desktop sessions aren't available on this native Windows PC yet. "
+                "Use `orbit chat <handle>` for a contained terminal conversation.")
+    return ""
+
+
+def require_employee_launch(emp: dict = None, surface: str = "run") -> None:
+    """Raise when an employee launch surface is not allowed on this machine."""
+    err = employee_launch_error(emp, surface)
+    if err:
+        raise RuntimeError(err)
+
+
 def sandbox_blob(emp: dict, unsandboxed: list) -> dict:
     """The run's sandbox as a settings blob: its folder, no secrets, no colleagues. Network: the
     approved sites only, or (Full autonomy) any site, with the filesystem limits unchanged.
@@ -388,7 +485,10 @@ def skills_plugin(emp: dict, wanted: list) -> str:
     return root
 
 
-def command(emp: dict, model: str) -> list:
+def command(emp: dict, model: str, interactive: bool = False) -> list:
+    """The claude command for one turn. interactive=True is the owner's own window on the same conversation
+    (`orbit chat`): no -p, no stream, and a tool outside the allowlist asks instead of being refused."""
+    require_employee_launch(emp, "terminal" if interactive else "run")
     import abilities                                       # the owners' ticks decide the tools
     allow, block = abilities.tools(emp["id"])
     gateways = abilities.commands(emp["id"])
@@ -402,8 +502,9 @@ def command(emp: dict, model: str) -> list:
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"mcpServers": servers}, fh)
         mcp = ["--mcp-config", path]
-    cmd = [resolve_claude(), "-p", "--model", model, "--effort", emp.get("effort", "medium"),
-           "--permission-mode", "bypassPermissions" if autonomous(emp) else "dontAsk", "--output-format", "stream-json", "--verbose",
+    mode = "bypassPermissions" if autonomous(emp) else ("default" if interactive else "dontAsk")
+    cmd = [resolve_claude()] + ([] if interactive else ["-p"]) + ["--model", model, "--effort", emp.get("effort", "medium"),
+           "--permission-mode", mode] + ([] if interactive else ["--output-format", "stream-json", "--verbose"]) + [
            "--setting-sources", launch_policy("employee", emp)["setting_sources"], "--strict-mcp-config", *mcp,
            "--settings", settings_json(emp, gateways), "--plugin-dir", GUARD, "--plugin-dir", bundle,
            "--append-system-prompt", "Paths: your team folder (~/Staff in the handbook) is %s; the kit (the handbook, "
@@ -451,9 +552,13 @@ def why_failed(err: str) -> str:
 
 def stream(cmd: list, prompt: str, ws: str, env: dict, timeout: int, on_step=None):
     """Runs one claude turn, reading its stream-json events as they come: each tool call becomes a plain
-    step ("Reading tiktok.com") passed to on_step(step, steps). Returns (final result event, steps)."""
+    step ("Reading tiktok.com") passed to on_step(step, steps). Returns (final result event, steps).
+    What the crew member *says* is every message that ended a turn: when a background job it started finishes,
+    Claude Code wakes it again and it ends another turn, so a run can speak more than once (the standup, then
+    "the render passed"). All of it is delivered, not only the last line; text written beside tool calls is
+    narration and stays in the receipt."""
     import steps as steps_mod
-    t0, steps, result, killed = time.time(), [], None, []
+    t0, steps, result, killed, said = time.time(), [], None, [], []
     errf = tempfile.TemporaryFile()
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True, cwd=ws, env=env)
     import awake                                           # the computer stays up until this run ends
@@ -476,7 +581,13 @@ def stream(cmd: list, prompt: str, ws: str, env: dict, timeout: int, on_step=Non
             except ValueError:
                 continue
             if ev.get("type") == "assistant":
-                for b in (ev.get("message") or {}).get("content") or []:
+                msg = ev.get("message") or {}
+                if msg.get("stop_reason") == "end_turn":
+                    spoken = "\n".join(b.get("text", "") for b in msg.get("content") or []
+                                       if isinstance(b, dict) and b.get("type") == "text").strip()
+                    if spoken:
+                        said.append(spoken)
+                for b in msg.get("content") or []:
                     if isinstance(b, dict) and b.get("type") == "tool_use":
                         text = steps_mod.describe(b.get("name"), b.get("input"), ws)
                         if text and (not steps or steps[-1]["text"] != text):
@@ -496,6 +607,9 @@ def stream(cmd: list, prompt: str, ws: str, env: dict, timeout: int, on_step=Non
             errf.seek(0)
             err = errf.read().decode("utf-8", "replace")
             result = {"is_error": True, "result": (err or "no output")[-400:]}
+        parts = [s for s in said if not s.upper().startswith("SILENT")]
+        if not result.get("is_error") and len(said) > 1 and parts:
+            result = {**result, "result": "\n\n".join(parts)}
         return result, steps
     finally:
         timer.cancel()
@@ -503,19 +617,176 @@ def stream(cmd: list, prompt: str, ws: str, env: dict, timeout: int, on_step=Non
         errf.close()
 
 
+# ------------------------------------------------------------------ one conversation, two doors
+# A crew member's conversation has one writer at a time: a run (busy.json) or the owner's own window on it
+# (chat.json, written by `orbit chat`; or a Claude Code window on that session, seen in ~/.claude/sessions).
+WINDOW_IDLE = 20 * 60          # a window left open but untouched this long no longer holds the routines
+
+
+def _alive(pid) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if os.name == "nt":                                # os.kill(pid, 0) is unreliable for an exited process here
+        try:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            k32.OpenProcess.restype = wintypes.HANDLE
+            k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            k32.WaitForSingleObject.restype = wintypes.DWORD
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            h = k32.OpenProcess(0x00100000, False, pid)   # SYNCHRONIZE
+            if not h:
+                return False
+            try:
+                return k32.WaitForSingleObject(h, 0) == 0x00000102   # WAIT_TIMEOUT: still running
+            finally:
+                k32.CloseHandle(h)
+        except (OSError, AttributeError):
+            return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def marker(ws: str, name: str):
+    """state/<name>.json when the process that wrote it is still alive, else None (and the stale file goes)."""
+    p = os.path.join(ws, "state", name + ".json")
+    try:
+        with open(p) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if _alive(d.get("pid")):
+        return d
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+    return None
+
+
+def mark(ws: str, name: str, **data) -> None:
+    p = os.path.join(ws, "state", name + ".json")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w") as fh:
+        json.dump({"pid": os.getpid(), "since": time.strftime("%Y-%m-%dT%H:%M:%S"), **data}, fh)
+
+
+def unmark(ws: str, name: str) -> None:
+    try:
+        os.remove(os.path.join(ws, "state", name + ".json"))
+    except OSError:
+        pass
+
+
+def busy(ws: str):
+    """The run in progress on this conversation ({"pid", "since", "job"}), or None."""
+    return marker(ws, "busy")
+
+
+def main_session(ws: str):
+    try:
+        with open(os.path.join(ws, "state", "sessions.json")) as fh:
+            return json.load(fh).get(SESSION)
+    except (OSError, ValueError):
+        return None
+
+
+def window_open(ws: str, env: dict = None):
+    """Is the owner in a window on this crew member's conversation right now? `orbit chat` leaves state/chat.json;
+    any Claude Code window on the same session shows under the effective data root's sessions. → {"since", "kind"} or None."""
+    m = marker(ws, "chat")
+    if m:
+        return {"since": m.get("since"), "kind": "terminal"}
+    sid = main_session(ws)
+    if not sid:
+        return None
+    for p in glob.glob(os.path.join(claude_data_root(env), "sessions", "*.json")):
+        try:
+            with open(p) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if d.get("sessionId") == sid and _alive(d.get("pid")):
+            return {"since": d.get("procStart") or "", "kind": d.get("entrypoint") or "claude"}
+    return None
+
+
+def window_idle(ws: str, env: dict = None) -> float:
+    """Seconds since the conversation's transcript last changed (a window open but untouched)."""
+    sid = main_session(ws)
+    if not sid:
+        return 0
+    p = os.path.join(transcripts(ws, env), sid + ".jsonl")
+    try:
+        return max(0.0, time.time() - os.path.getmtime(p))
+    except OSError:
+        return 0
+
+
+def wait_for_window(ws: str, on_wait=None, limit: int = WINDOW_IDLE, every: float = 5.0, env: dict = None) -> bool:
+    """A run waits while the owner has a window open on the conversation, like a colleague who doesn't start
+    the standup while you're talking to them. A window left idle for `limit` seconds stops holding things:
+    the run goes ahead. True when the way is clear, False when it went ahead over an idle window."""
+    while True:
+        w = window_open(ws, env)
+        if not w:
+            return True
+        if window_idle(ws, env) >= limit:
+            return False
+        if on_wait:
+            on_wait(w)
+        time.sleep(every)
+
+
+def remember_session(ws: str, key: str, sid: str) -> None:
+    sessions_f = os.path.join(ws, "state", "sessions.json")
+    try:
+        with open(sessions_f) as fh:
+            sessions = json.load(fh)
+    except (OSError, ValueError):
+        sessions = {}
+    sessions[key], sessions[key + "_day"] = sid, time.strftime("%F")
+    os.makedirs(os.path.dirname(sessions_f), exist_ok=True)
+    with open(sessions_f, "w") as fh:
+        json.dump(sessions, fh, indent=1)
+
+
+def chat_window(emp: dict) -> dict:
+    """The owner's own Claude window on this crew member's running conversation: `claude --resume <main>` in
+    its folder with the same model, settings and locks as its runs. A new conversation (none yet, or the old
+    one is full) starts with the orientation note as its first message. → {"cmd", "env", "cwd", "sid", "new"}"""
+    ws = emp["workspace"]
+    env = clean_env(emp)
+    sid = main_session(ws)
+    new = not sid or context_tokens(ws, sid, env) >= FULL
+    if new:
+        sid = str(uuid.uuid4())
+    cmd = command(emp, pick_model(emp, "chat"), interactive=True)
+    cmd += ["--resume", sid] if not new else ["--session-id", sid, ORIENT.strip()]
+    return {"cmd": cmd, "env": env, "cwd": ws, "sid": sid, "new": new}
+
+
 def run(emp: dict, prompt: str, job: str = "chat", session_key: str = None,
         timeout: int = 1800, extra_env: dict = None, on_step=None) -> dict:
-    """Run the employee headless in its folder. Chats resume one session per (employee, person).
-    on_step(step, steps) is called live for every tool call; the steps also come back in the result.
+    """Run the employee headless in its folder, in its one running conversation: every routine, follow-up and chat
+    is a new turn of the same session, so it remembers the day like a chat window does (`session_key` names another
+    thread; tests use it). on_step(step, steps) is called live for every tool call; the steps also come back in the result.
     Nothing probes the provider's reachability first: Claude's own process result is the source of truth."""
     if os.environ.get("STAFFROOM_DEMO"):                  # `orbit demo`: canned answers, no Claude run
         import demo
         return demo.fake_run(emp, prompt, job, session_key, on_step)
-    if osinfo.KIND == "windows" and (registry().get("platform") or {}).get("sandbox_mode") == "wsl2":
-        return {"ok": False,                                              # the mode gates the flow; never
-                "text": "Your crew runs in WSL2 mode: start it inside WSL (the Ubuntu window), not "
-                        "on the Windows side. (See docs/SETUP.md, 'Windows through WSL'.)",
-                "error": "sandbox mode is wsl2", "steps": []}             # switching mid-flight (SC3)
+    blocked = employee_launch_error(emp, "run")            # one machine-mode decision, before any launch
+    if blocked:
+        return {"ok": False, "text": blocked, "error": "sandbox mode is wsl2", "steps": []}
     if not os.path.isfile(os.path.join(GUARD, "hooks", "register.js")):
         return {"ok": False, "text": "My safety guard is missing, so I've stopped myself. Owner: reinstall the kit.",
                 "error": "guard missing", "model": None}
@@ -526,25 +797,43 @@ def run(emp: dict, prompt: str, job: str = "chat", session_key: str = None,
             sessions = json.load(fh)
     except (OSError, ValueError):
         sessions = {}
-    model = pick_model(emp)
+    model = pick_model(emp, job)
+    env = clean_env(emp)
     base = command(emp, model)
-    attempts = []
-    if session_key and sessions.get(session_key):
-        attempts.append(("resume", sessions[session_key]))
-    attempts.append(("new", str(uuid.uuid4())))
-    t0, d, steps = time.time(), {}, []
-    for kind, sid in attempts:
-        cmd = base + (["--resume", sid] if kind == "resume" else ["--session-id", sid])
-        d, steps = stream(cmd, prompt, ws, {**clean_env(emp), **(extra_env or {})}, timeout, on_step)
-        if not d.get("is_error"):
-            if session_key:
-                sessions[session_key] = sid
-                os.makedirs(os.path.dirname(sessions_f), exist_ok=True)
-                with open(sessions_f, "w") as fh:
-                    json.dump(sessions, fh, indent=1)
+    key = session_key or SESSION
+    while True:                                            # one writer at a time: another process's run finishes first
+        b = busy(ws)
+        if not b or b.get("pid") == os.getpid():
             break
-        if re.search(r"limit|authenticate", str(d.get("result", ""))) or NETWORK.search(str(d.get("result", ""))):
-            break                                          # a fresh session won't help
+        time.sleep(3)
+    clear = wait_for_window(ws, on_step and (lambda w: on_step({"text": "Waiting: the owner has a chat window open", "wait": True}, [])), env=env)
+    attempts = []
+    if sessions.get(key) and not (key == SESSION and fresh_start(sessions, ws, env=env)):
+        attempts.append(("resume", sessions[key]))
+    attempts.append(("new", str(uuid.uuid4())))
+    aside = not clear and key == SESSION                   # the owner's window stays on main: this turn runs on a copy
+
+    def remember(sid):
+        sessions[key], sessions[key + "_day"] = sid, time.strftime("%F")
+        os.makedirs(os.path.dirname(sessions_f), exist_ok=True)
+        with open(sessions_f, "w") as fh:
+            json.dump(sessions, fh, indent=1)
+    t0, d, steps = time.time(), {}, []
+    mark(ws, "busy", job=job)
+    try:
+        for kind, sid in attempts:
+            cmd = base + (["--resume", sid] + (["--fork-session"] if aside and kind == "resume" else [])
+                          if kind == "resume" else ["--session-id", sid])
+            text = prompt if kind == "resume" else ORIENT + prompt
+            d, steps = stream(cmd, text, ws, {**env, **(extra_env or {})}, timeout, on_step)
+            if not d.get("is_error"):
+                if not aside:
+                    remember(sid)
+                break
+            if re.search(r"limit|authenticate", str(d.get("result", ""))) or NETWORK.search(str(d.get("result", ""))):
+                break                                          # a fresh session won't help
+    finally:
+        unmark(ws, "busy")
     err = str(d.get("result", "")) if d.get("is_error") else ""
     text = friendly_error(err) if d.get("is_error") else (d.get("result") or "").strip()
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "employee": emp["id"], "job": job,
@@ -605,17 +894,15 @@ def stats(emp: dict) -> dict:
 
 
 # ------------------------------------------------------------------ a Claude session in the employee's folder
-SESSION_HELLO = ("Hi %s. Introduce yourself to me in a few short lines: your job as you understand it, what you'll "
-                 "do first, and anything you need from me. Read your CLAUDE.md and notes first.")
-
-
 def claude_session(emp_id: str) -> dict:
     """Readies the employee's folder so a Claude app session opened there is that employee, with the same locks
     as its runs: the sandbox, the deny list and the guard (installed for this folder only), its abilities and
     its tools. Written to .claude/settings.local.json, which the harness's own runs don't read (they use
-    --setting-sources project), so runs and sessions never double up. → {"folder", "link", "hello"}"""
+    --setting-sources project), so runs and sessions never double up. → {"folder", "link", "hello", "chat"}: `link` opens a new Claude app chat there
+    whose first message sets up its routines (claudeapp); `chat` is the chat once it has (None before)."""
     import abilities
     emp = employee(emp_id)
+    require_employee_launch(emp, "desktop")               # native employee Desktop stays gated pending feature 003
     ws = emp["workspace"]
     allow, block = abilities.tools(emp["id"])
     blob = json.loads(settings_json(emp, abilities.commands(emp["id"])))
@@ -685,6 +972,8 @@ def claude_session(emp_id: str) -> dict:
     import grants                                          # the key the guard needs to apply an owner's Yes
     grants.key()
     import urllib.parse
-    hello = SESSION_HELLO % emp["name"]
+    import claudeapp
+    claudeapp.write_plan(emp_id)
+    hello = claudeapp.setup_message(emp_id)                # the chat sets up its routines, then says hello
     link = "claude://code/new?" + urllib.parse.urlencode({"folder": ws, "q": hello}, quote_via=urllib.parse.quote)
-    return {"folder": ws, "link": link, "hello": hello}
+    return {"folder": ws, "link": link, "hello": hello, "chat": claudeapp.chat_link(emp_id)}

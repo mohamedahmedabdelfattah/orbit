@@ -37,7 +37,8 @@ def path(ws):
 
 def load(ws):
     try:
-        return json.load(open(path(ws)))
+        with open(path(ws), encoding="utf-8") as stream:
+            return json.load(stream)
     except (OSError, ValueError):
         return []
 
@@ -45,7 +46,8 @@ def load(ws):
 def save(ws, items):
     os.makedirs(os.path.dirname(path(ws)), exist_ok=True)
     tmp = path(ws) + ".tmp"
-    json.dump(items, open(tmp, "w"), indent=1, ensure_ascii=False)
+    with open(tmp, "w", encoding="utf-8") as stream:
+        json.dump(items, stream, indent=1, ensure_ascii=False)
     os.replace(tmp, path(ws))
 
 

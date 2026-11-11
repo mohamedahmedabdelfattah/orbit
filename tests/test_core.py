@@ -9,12 +9,17 @@ import re
 import shutil
 import sys
 import tempfile
+import subprocess
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 
 TMP = tempfile.mkdtemp(prefix="staffroom-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cleanup  # noqa: E402
+_cleanup.on_exit(TMP)                      # nothing left behind: temp folders, transcripts
 os.environ["STAFFROOM_HOME"] = TMP
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(KIT, "core"))
@@ -153,7 +158,12 @@ class Engine(unittest.TestCase):
         cmd = engine.command(emp, "sonnet")
         s = json.loads(cmd[cmd.index("--settings") + 1])
         sb = s["sandbox"]
-        self.assertTrue(sb["enabled"] and not sb["allowUnsandboxedCommands"] and sb["failIfUnavailable"])
+        self.assertTrue(sb["enabled"] and not sb["allowUnsandboxedCommands"])
+        if osinfo.KIND == "windows":                       # MXC is the boundary: its PreToolUse hook, not the built-in sandbox
+            self.assertNotIn("failIfUnavailable", sb)
+            self.assertTrue(s.get("hooks", {}).get("PreToolUse"))
+        else:
+            self.assertTrue(sb["failIfUnavailable"])
         self.assertTrue(sb["network"]["strictAllowlist"])
         self.assertIn("api.example.com", sb["network"]["allowedDomains"])
         self.assertEqual(sorted(sb["excludedCommands"]), ["staff-browse *", "staff-connectors *", "staff-fetch *", "staff-video *"])
@@ -168,6 +178,11 @@ class Engine(unittest.TestCase):
         self.assertIn("Bash(staff-apify *)", denied)
         self.assertIn("Bash(git push *)", denied)
         self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
+        win = engine.command(emp, "opus", interactive=True)                 # the owner's own window: no -p, asks
+        self.assertNotIn("-p", win)
+        self.assertNotIn("--output-format", win)
+        self.assertEqual(win[win.index("--permission-mode") + 1], "default")
+        self.assertEqual(win[win.index("--settings") + 1], cmd[cmd.index("--settings") + 1])   # same locks
 
 
 SENTINEL_ENV = {"CLAUDECODE": "1", "ANTHROPIC_BASE_URL": "http://inherited:4000",
@@ -194,7 +209,7 @@ class ProviderNeutralRun(unittest.TestCase):
         engine.resolve_claude = self.real
 
     def fake(self, **cfg):
-        self.dir = tempfile.mkdtemp(prefix="fake-claude-")
+        self.dir = _cleanup.temp("fake-claude-")
         engine.resolve_claude = lambda: fake_claude.install(self.dir, **cfg)
 
     @POSIX_FAKE_RUN
@@ -296,7 +311,7 @@ class DiagnosticProvenance(unittest.TestCase):
                 os.environ[k] = v
 
     def fake(self, **cfg):
-        self.dir = tempfile.mkdtemp(prefix="fake-claude-")
+        self.dir = _cleanup.temp("fake-claude-")
         engine.resolve_claude = lambda: fake_claude.install(self.dir, **cfg)
 
     @POSIX_FAKE_RUN
@@ -451,7 +466,7 @@ class EmployeeLaunch(unittest.TestCase):
                 os.environ[k] = v
 
     def fake(self, **cfg):
-        self.dir = tempfile.mkdtemp(prefix="fake-claude-")   # outside the Orbit home: the recorder
+        self.dir = _cleanup.temp("fake-claude-")   # outside the Orbit home: the recorder
         engine.resolve_claude = lambda: fake_claude.install(self.dir, **cfg)  # writes sentinels by design
 
     def ordinary_run(self, **run_kw):
@@ -582,8 +597,15 @@ class HireAndPluginLaunch(unittest.TestCase):
                 os.environ[k] = v
 
     def fake(self, **cfg):
-        self.dir = tempfile.mkdtemp(prefix="fake-claude-")   # outside the Orbit home (the recorder
+        self.dir = _cleanup.temp("fake-claude-")   # outside the Orbit home (the recorder
         engine.resolve_claude = lambda: fake_claude.install(self.dir, **cfg)  # writes sentinels by design)
+
+    def supported_desktop(self):
+        """Plugin administration is a supported-desktop behavior; native-Windows Desktop refusal has
+        its own focused tests (T036/T037)."""
+        old = osinfo.KIND
+        osinfo.KIND = "linux"
+        self.addCleanup(setattr, osinfo, "KIND", old)
 
     def test_structured_onboarding_uses_user_source_and_no_tools(self):
         import onboard
@@ -620,6 +642,7 @@ class HireAndPluginLaunch(unittest.TestCase):
             self.assertNotEqual(env.get("ANTHROPIC_API_KEY"), "sk-stored-orbit")
 
     def test_plugin_administration_is_pass_through_without_overlays_or_keys(self):
+        self.supported_desktop()
         self.fake()                                        # plugin answer: already installed
         os.environ.update(SENTINEL_ENV)
         s = engine.claude_session("tess")
@@ -645,6 +668,7 @@ class HireAndPluginLaunch(unittest.TestCase):
             self.assertEqual(out.read().strip(), json.load(fh)["version"])   # the install actually stamped
 
     def test_legacy_plugin_administration_stays_key_free(self):
+        self.supported_desktop()
         reg = engine.registry()
         reg["auth"] = "api_key"
         engine.save_registry(reg)
@@ -747,6 +771,37 @@ class Panel(unittest.TestCase):
         self.assertEqual([f["path"] for f in d["files"]][0], "research/notes.md")          # newest first
         self.assertTrue(all(f["path"].split("/")[0] in ("research", "notes", "tools", "growth", "evals") for f in d["files"]))
         self.assertEqual(self.req("/api/employee/nobody", headers=self.auth())[0], 404)
+
+    def test_unread_and_seen_in_the_panel(self):
+        team.feed("tess", "Tess", "Alex", "Standup: all good.", "job")
+        code, _, body = self.req("/api/state", headers=self.auth())
+        self.assertEqual(code, 200)
+        self.assertGreaterEqual(json.loads(body)["unread"], 1)
+        code, _, body = self.req("/api/seen", {}, headers=self.auth({"Origin": self.base}))
+        self.assertEqual((code, json.loads(body)["ok"]), (200, True))
+        _, _, body = self.req("/api/state", headers=self.auth())
+        self.assertEqual(json.loads(body)["unread"], 0)
+
+    def test_scoped_seen_in_the_panel_keeps_another_report_unread(self):
+        import hire
+        hire.hire("Omar", "Social", supervisor="Alex")
+        ts = "2026-11-10 11:00:00"
+        try:
+            team.append(team.FEED, {"id": "paneltess001", "ts": ts, "from_id": "tess", "from_name": "Tess",
+                                    "to_id": "Alex", "body": "Tess panel report", "channel": "job"})
+            team.append(team.FEED, {"id": "panelomar001", "ts": ts, "from_id": "omar", "from_name": "Omar",
+                                    "to_id": "Alex", "body": "Omar panel report", "channel": "job"})
+            h = self.auth({"Origin": self.base})
+            self.assertEqual(self.req("/api/seen", {"employee": "tess"}, h)[0], 200)
+            self.assertEqual([r["body"] for r in team.unread("Alex")], ["Omar panel report"])
+            self.assertEqual(team.unread("Alex", "tess"), [])
+            self.assertEqual(self.req("/api/seen", {"employee": "nobody"}, h)[0], 404)
+            self.assertEqual(self.req("/api/seen", {}, h)[0], 200)     # the full room clears the rest
+            self.assertEqual(team.unread("Alex"), [])
+        finally:
+            reg = engine.registry()
+            reg["employees"].pop("omar", None)
+            engine.save_registry(reg)
 
     def test_files_stay_inside_the_workspace(self):
         code, _, body = self.req("/api/file?emp=tess&path=research/notes.md", headers=self.auth())
@@ -885,7 +940,7 @@ class Channels(unittest.TestCase):
             self.assertIn("@tess", sent[-1][1])
             staffd.handle({**dm, "text": "@tess what's new?"})
             a, k = runs[-1]
-            self.assertEqual((a[0], k["session_key"], k["deliver_to"], k["channel"], k["said"]), ("tess", "slack:U1", ["slack:D1"], "slack", "what's new?"))
+            self.assertEqual((a[0], k["session_key"], k["deliver_to"], k["channel"], k["said"]), ("tess", None, ["slack:D1"], "slack", "what's new?"))
             self.assertEqual(team.to_people(engine.employee("tess"), "supervisor"), ["slack:D1"])   # replies go where they wrote
             staffd.handle({**dm, "sender": "slack:U9", "sender_name": "Stranger"})
             self.assertEqual(len(runs), 1)
@@ -899,7 +954,7 @@ class Channels(unittest.TestCase):
             engine.save_registry(reg)
             staffd.handle(grp)
             a, k = runs[-1]
-            self.assertEqual((a[0], k["session_key"], k["deliver_to"], k["channel"]), ("tess", "group", ["slack:C1"], "group"))
+            self.assertEqual((a[0], k["session_key"], k["deliver_to"], k["channel"]), ("tess", None, ["slack:C1"], "group"))
             staffd.handle({**grp, "text": "just us owners talking"})
             self.assertEqual(len(runs), 2)                             # no employee named: stay out
             team.send("slack:C1", "hello room")
@@ -963,6 +1018,7 @@ class LiveSteps(unittest.TestCase):
         self.assertEqual(steps.describe("Bash", {"command": "python3 /w/tools/price_check.py"}, ws), "Running my tool tools/price_check.py")
         self.assertIsNone(steps.describe("SomethingNew", {}, ws))
 
+    @POSIX_FAKE_RUN
     def test_run_streams_steps_and_keeps_a_receipt(self):
         self.fake()
         seen = []
@@ -976,6 +1032,7 @@ class LiveSteps(unittest.TestCase):
             rec = json.loads(fh.read().splitlines()[-1])
         self.assertEqual((rec["ok"], rec["cost_usd"], len(rec["steps"])), (True, 0.0123, 4))
 
+    @POSIX_FAKE_RUN
     def test_timeout(self):
         self.fake(sleep=5)
         res = engine.run(self.emp, "hi", job="brief", timeout=1)
@@ -1041,7 +1098,8 @@ class Onboarding(unittest.TestCase):
             code = r["code"]
             self.assertRegex(code, r"^\d{6}$")
             self.assertEqual(r["link"], "https://t.me/acme_team_bot?start=" + code)
-            self.assertEqual(oct(os.stat(os.path.join(engine.SECRETS, "telegram_bot_token")).st_mode & 0o777), "0o600")
+            if os.name != "nt":                            # Windows chmod has no group/other bits; the sandbox and guard deny the file
+                self.assertEqual(oct(os.stat(os.path.join(engine.SECRETS, "telegram_bot_token")).st_mode & 0o777), "0o600")
             msg = {"channel": "telegram", "sender": "telegram:555", "sender_name": "Mallory", "username": "m", "chat": "telegram:555",
                    "is_group": False, "chat_title": None, "text": "/start 000000", "reply_to_text": "", "attachments": []}
             self.assertFalse(staffd.try_pair(msg))                             # wrong code
@@ -1103,8 +1161,9 @@ class Skills(unittest.TestCase):
         hire.hire("Omar", "Watcher", supervisor="Alex")
         emp = engine.employee("omar")
         root = engine.skills_plugin(emp, abilities.skills("omar"))
-        self.assertTrue(os.path.islink(os.path.join(root, "skills", "price-check")))
-        self.assertTrue(os.path.islink(os.path.join(root, "skills", "research-playbook")))
+        is_link = lambda p: os.path.islink(p) or bool(getattr(os.path, "isjunction", lambda _p: False)(p))
+        self.assertTrue(is_link(os.path.join(root, "skills", "price-check")))
+        self.assertTrue(is_link(os.path.join(root, "skills", "research-playbook")))
         skillbook.create("omar", "price-check", "Omar's own way to check prices, used when asked.", "Steps:\n1. Open the price page.\n2. Note every price with its date and link.\n")
         links, skipped = skillbook.bundle(emp["workspace"], [])
         self.assertEqual(os.path.realpath(links["price-check"]), os.path.realpath(os.path.join(emp["workspace"], "skills", "price-check")))
@@ -1118,20 +1177,20 @@ class Skills(unittest.TestCase):
 
     def test_tool_respects_the_ability(self):
         import subprocess
-        tool = os.path.join(KIT, "bin", "staff-skill")
+        tool = [sys.executable, os.path.join(KIT, "core", "tools", "skill.py")]   # same tool, no POSIX shebang needed
         env = {**os.environ, "STAFF_EMPLOYEE": "tess", "STAFF_WORKSPACE": engine.employee("tess")["workspace"], "STAFFROOM_HOME": TMP}
-        r = subprocess.run([tool, "new", "feed-finder", "--description", "Finding a site's hidden JSON feed; use when a page is slow to scrape."],
+        r = subprocess.run(tool + ["new", "feed-finder", "--description", "Finding a site's hidden JSON feed; use when a page is slow to scrape."],
                            env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Created skills/feed-finder/SKILL.md", r.stdout)
-        r = subprocess.run([tool, "check", "feed-finder"], env=env, capture_output=True, text=True)
+        r = subprocess.run(tool + ["check", "feed-finder"], env=env, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("step 1 is empty", r.stderr)
-        r = subprocess.run([tool, "list"], env=env, capture_output=True, text=True)
+        r = subprocess.run(tool + ["list"], env=env, capture_output=True, text=True)
         self.assertIn("feed-finder", r.stdout)
         self.assertIn("not loading", r.stdout)
         hire.set_abilities("tess", [a for a in abilities.chosen("tess") if a != "learn"], "test")
-        r = subprocess.run([tool, "new", "another-one", "--description", "Something else entirely, used whenever."], env=env, capture_output=True, text=True)
+        r = subprocess.run(tool + ["new", "another-one", "--description", "Something else entirely, used whenever."], env=env, capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("switched off", r.stderr)
         hire.set_abilities("tess", abilities.preset("default"), "test")
@@ -1233,7 +1292,7 @@ class LaunchInventory(unittest.TestCase):
         ("core/cloud.py", "new_session"): "L10",
         ("core/cloud.py", "_transcript"): "L11",
     }
-    SITE = re.compile(r"(?:=\s*\(?(?:engine\.)?resolve_claude\(\)|\[(?:engine\.)?resolve_claude\(\),"
+    SITE = re.compile(r"(?:=\s*\(?(?:engine\.)?resolve_claude\(\)|\[(?:engine\.)?resolve_claude\(\)(?:,|\])"
                       r"|(?:,\s*|\()\s*(?:engine\.)?resolve_claude\(\)"
                       r"|subprocess\.\w+\(\s*\[?(?:engine\.)?resolve_claude)")
 
@@ -1286,7 +1345,7 @@ class StaticContracts(unittest.TestCase):
 
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     RUNTIME = re.compile(r"^(?:core/[^/]+\.py|core/panel/app\.js|orbit)$")
-    DOC_ROOTS = ("README.md", "SETUP.md", "install.sh", "setup-windows.ps1", "docs", "templates",
+    DOC_ROOTS = ("README.md", "SETUP.md", "PRODUCT.md", "install.sh", "setup-windows.ps1", "docs", "templates",
                  ".github")
     SKIP_DOCS = ("docs/superpowers/",)                       # historical design, excluded by SC-007
     TEXT = (".md", ".sh", ".ps1", ".py", ".js", ".yml", ".yaml", ".json", ".txt")
@@ -1311,7 +1370,7 @@ class StaticContracts(unittest.TestCase):
                 yield "core/" + name, os.path.join(core, name)
 
     def _documented(self):
-        for name in ("README.md", "SETUP.md", "install.sh", "setup-windows.ps1"):
+        for name in ("README.md", "SETUP.md", "PRODUCT.md", "install.sh", "setup-windows.ps1"):
             yield name, os.path.join(self.ROOT, name)
         for root in ("docs", "templates", ".github"):
             for dirpath, dirnames, filenames in os.walk(os.path.join(self.ROOT, root)):
@@ -1376,6 +1435,41 @@ class StaticContracts(unittest.TestCase):
                 hits.append("%s:%d: %s" % (rel, n, line.strip()))
         self.assertEqual(hits, [], "sign-in/account-login wording is account-only Cloud Shift guidance (FR-004)")
 
+    def test_ordinary_copy_uses_configured_connection_and_conditional_usage(self):
+        def text(rel):
+            with open(os.path.join(self.ROOT, *rel.split("/")), encoding="utf-8") as fh:
+                return fh.read()
+
+        readme, setup, product = text("README.md"), text("SETUP.md"), text("PRODUCT.md")
+        onboard, app, panel = text("core/onboard.py"), text("core/panel/app.js"), text("core/panel.py")
+        for rel, body in (("README.md", readme), ("SETUP.md", setup), ("PRODUCT.md", product),
+                          ("core/onboard.py", onboard), ("core/panel/app.js", app)):
+            self.assertIn("configured connection", body.lower(), rel)
+        self.assertIn("limits when Claude reports them", readme)
+        self.assertIn("Limits are the ones Claude reports", app)
+        self.assertIn("when Claude reports usage is high", app)
+
+        # `subscription` is an old persisted compatibility value, not evidence about the live connection.
+        self.assertIn('reg.get("auth", "subscription")', panel)
+        self.assertNotRegex(app, r"auth\s*={2,3}\s*['\"]subscription['\"]")
+        self.assertIn("s.auth === 'api_key' ? 'your legacy Anthropic API key' : \"Claude's configured connection\"", app)
+
+        # Provider/account-specific words stay at their actual boundaries: legacy key or Cloud Shift.
+        cost = readme.split("## What it costs", 1)[1].split("## Commands", 1)[0]
+        self.assertIn("own Anthropic API key", cost)
+        self.assertIn("Cloud Shift is separate and optional", cost)
+        self.assertNotRegex(onboard, r"(?i)anthropic|subscription|claude account|api key")
+
+    def test_brain_and_hands_are_model_roles_not_connection_routing(self):
+        with open(os.path.join(self.ROOT, "core", "engine.py"), encoding="utf-8") as fh:
+            source = fh.read()
+        match = re.search(r"^def pick_model\(.*?(?=^def )", source, re.M | re.S)
+        self.assertIsNotNone(match)
+        body = match.group(0)
+        self.assertIn('emp.get("brain")', body)
+        self.assertIn('emp.get("model", "sonnet")', body)
+        self.assertNotRegex(body, r"(?i)provider|connection|anthropic|api.key|launch_policy|setting.sources")
+
     def test_no_provider_integration_surface_was_added(self):
         self.assertEqual(sorted(p for p in os.listdir(self.ROOT)
                                 if p in ("requirements.txt", "pyproject.toml", "Pipfile", "setup.py",
@@ -1400,6 +1494,519 @@ class StaticContracts(unittest.TestCase):
 
 
 import urllib.parse  # noqa: E402
+
+
+class Brain(unittest.TestCase):
+    """0.9: a brain and hands, and one running conversation per crew member."""
+
+    def setUp(self):
+        fresh_team()
+        self._usage = engine.usage
+        engine.usage = lambda: {}
+
+    def tearDown(self):
+        engine.usage = self._usage
+
+    def test_brain_thinks_hands_work(self):
+        hire.hire("Tess", "Research", supervisor="Alex")
+        emp = engine.employee("tess")
+        for job in ("chat", "standup", "initiative", "eod", "review", "catchup", "first_day"):
+            self.assertEqual(engine.pick_model(emp, job), "opus", job)
+        for job in ("followup", "brief", "scout", "evals", "bus"):
+            self.assertEqual(engine.pick_model(emp, job), "sonnet", job)
+        hire.set_field("tess", "brain", "sonnet")
+        hire.set_field("tess", "model", "haiku")
+        emp = engine.employee("tess")
+        self.assertEqual((engine.pick_model(emp, "standup"), engine.pick_model(emp, "followup")), ("sonnet", "haiku"))
+        with self.assertRaises(hire.HireError):
+            hire.set_field("tess", "brain", "gpt-5")
+        engine.usage = lambda: {"five_hour": 85}
+        self.assertEqual(engine.pick_model(emp, "standup"), "haiku")   # the plan is nearly used up: both go light
+
+    def test_conversation_runs_on_until_heavy(self):
+        hire.hire("Tess", "Research", supervisor="Alex")
+        ws = engine.employee("tess")["workspace"]
+        sid = "11111111-2222-3333-4444-555555555555"
+        folder = os.path.join(os.path.expanduser("~/.claude/projects"), re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(ws)))
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, sid + ".jsonl")
+
+        def transcript(ctx):
+            with open(path, "w") as fh:
+                fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n")
+                fh.write(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [], "usage": {
+                    "input_tokens": 10, "cache_read_input_tokens": ctx - 20, "cache_creation_input_tokens": 10}}}) + "\n")
+        try:
+            self.assertFalse(engine.fresh_start({}, ws))                                    # nothing to resume
+            s = {engine.SESSION: sid, engine.SESSION + "_day": "2026-11-06"}
+            self.assertFalse(engine.fresh_start(s, ws, today="2026-11-07"))                 # no transcript yet: resume
+            transcript(30_000)
+            self.assertFalse(engine.fresh_start(s, ws, today="2026-11-07"))                 # light: runs on across days
+            transcript(90_000)
+            self.assertFalse(engine.fresh_start(s, ws, today="2026-11-06"))                 # heavy, same day: runs on
+            self.assertTrue(engine.fresh_start(s, ws, today="2026-11-07"))                  # heavy, new day: fresh
+            transcript(170_000)
+            self.assertTrue(engine.fresh_start(s, ws, today="2026-11-06"))                  # near the limit: fresh now
+            self.assertEqual(engine.context_tokens(ws, sid), 170_000)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_upgrade_turns_the_supervisor_chat_into_the_conversation(self):
+        hire.hire("Tess", "Research", supervisor="Alex")
+        ws = engine.employee("tess")["workspace"]
+        os.makedirs(os.path.join(ws, "state"), exist_ok=True)
+        with open(os.path.join(ws, "state", "sessions.json"), "w") as fh:
+            json.dump({"terminal": "t-1", "panel:alex": "p-1"}, fh)
+        reg = engine.registry()
+        reg["employees"]["tess"].pop("brain_v1", None)
+        engine.save_registry(reg)
+        hire.upgrade_workspace("tess")
+        with open(os.path.join(ws, "state", "sessions.json")) as fh:
+            self.assertEqual(json.load(fh)[engine.SESSION], "p-1")
+        self.assertTrue(engine.registry()["employees"]["tess"]["brain_v1"])
+
+
+FAKE_TWICE = r'''#!/usr/bin/env python3
+import json, sys
+sys.stdin.read()
+def out(d):
+    print(json.dumps(d), flush=True)
+out({"type": "system", "subtype": "init"})
+out({"type": "assistant", "message": {"stop_reason": "tool_use", "content": [{"type": "text", "text": "Checking the render first."},
+     {"type": "tool_use", "name": "Bash", "input": {"command": "python3 WS/tools/render.py"}}]}})
+out({"type": "user", "message": {"content": [{"type": "tool_result", "content": "started in the background"}]}})
+out({"type": "assistant", "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Subs 140 (+6). Today: the brake-fade Short, then the 21:00 slot."}]}})
+out({"type": "user", "message": {"content": "<task-notification>render done</task-notification>"}})
+out({"type": "assistant", "message": {"stop_reason": "end_turn", "content": [{"type": "text", "text": "LAST"}]}})
+out({"type": "result", "subtype": "success", "is_error": False, "result": "LAST", "num_turns": 3, "total_cost_usd": 0.01})
+'''
+
+
+class Spoken(unittest.TestCase):
+    """A run that ends more than one turn (a background job woke it again) delivers everything it said."""
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex")
+        self.emp = engine.employee("tess")
+        self.real = engine.resolve_claude
+
+    def tearDown(self):
+        engine.resolve_claude = self.real
+
+    def fake(self, last):
+        p = os.path.join(TMP, "fake-claude-twice")
+        with open(p, "w") as fh:
+            fh.write(FAKE_TWICE.replace("WS", self.emp["workspace"]).replace("LAST", last))
+        os.chmod(p, 0o755)
+        engine.resolve_claude = lambda: p
+
+    @POSIX_FAKE_RUN
+    def test_the_standup_is_not_lost_behind_the_render_update(self):
+        self.fake("The render passed QC; uploading next.")
+        res = engine.run(self.emp, "standup", job="standup")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["text"], "Subs 140 (+6). Today: the brake-fade Short, then the 21:00 slot.\n\nThe render passed QC; uploading next.")
+        self.assertEqual([s["text"] for s in res["steps"]], ["Running my tool tools/render.py"])   # narration isn't a step
+
+    @POSIX_FAKE_RUN
+    def test_a_silent_second_turn_keeps_the_first(self):
+        self.fake("SILENT")
+        res = engine.run(self.emp, "standup", job="standup")
+        self.assertEqual(res["text"], "Subs 140 (+6). Today: the brake-fade Short, then the 21:00 slot.")
+
+
+FAKE_ARGS = r"""#!/usr/bin/env python3
+import json, os, sys, time
+sys.stdin.read()
+time.sleep(SLEEP)
+with open(os.path.join("WS", "state", "argv.json"), "w") as fh:
+    json.dump(sys.argv[1:], fh)
+print(json.dumps({"type": "system", "subtype": "init"}), flush=True)
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "Done.", "num_turns": 1, "total_cost_usd": 0.001}), flush=True)
+"""
+
+
+class Window(unittest.TestCase):
+    """0.10: the owner's window on a crew member's conversation, and the inbox that reaches them."""
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex")
+        self.emp = engine.employee("tess")
+        self.ws = self.emp["workspace"]
+        self.real, self.real_usage = engine.resolve_claude, engine.usage
+        engine.usage = lambda: {}
+
+    def tearDown(self):
+        engine.resolve_claude, engine.usage = self.real, self.real_usage
+
+    def fake(self, sleep=0):
+        p = os.path.join(TMP, "fake-claude-args")
+        with open(p, "w") as fh:
+            fh.write(FAKE_ARGS.replace("WS", self.ws).replace("SLEEP", str(sleep)))
+        os.chmod(p, 0o755)
+        engine.resolve_claude = lambda: p
+
+    def argv(self):
+        with open(os.path.join(self.ws, "state", "argv.json")) as fh:
+            return json.load(fh)
+
+    def test_chat_window_is_the_same_conversation(self):
+        w = engine.chat_window(self.emp)                                   # nothing yet: a new conversation, oriented
+        self.assertTrue(w["new"])
+        self.assertEqual(w["cmd"][w["cmd"].index("--session-id") + 1], w["sid"])
+        self.assertTrue(w["cmd"][-1].startswith("[New conversation."))
+        self.assertNotIn("-p", w["cmd"])
+        self.assertEqual(w["cwd"], self.ws)
+        engine.remember_session(self.ws, engine.SESSION, w["sid"])
+        w2 = engine.chat_window(self.emp)                                  # next time: the same session, resumed
+        self.assertFalse(w2["new"])
+        self.assertEqual(w2["cmd"][-2:], ["--resume", w["sid"]])
+        self.assertEqual(engine.main_session(self.ws), w["sid"])
+
+    @POSIX_FAKE_RUN
+    def test_runs_wait_while_the_owner_is_in_the_window(self):
+        self.fake()
+        engine.mark(self.ws, "chat", who="Alex")                           # the window is open (this process)
+        self.assertEqual(engine.window_open(self.ws)["kind"], "terminal")
+        threading.Timer(1.2, lambda: engine.unmark(self.ws, "chat")).start()
+        t0 = time.time()
+        res = engine.run(self.emp, "hi", job="brief")
+        self.assertTrue(res["ok"], res)
+        self.assertGreaterEqual(time.time() - t0, 1.0)                    # it waited for the window to close
+        self.assertNotIn("--fork-session", self.argv())
+        self.assertIsNone(engine.busy(self.ws))                            # the busy marker is gone after the run
+        self.assertIsNone(engine.window_open(self.ws))
+
+    @POSIX_FAKE_RUN
+    def test_a_window_left_idle_stops_holding_the_routines(self):
+        self.fake()
+        sid = "22222222-3333-4444-5555-666666666666"
+        engine.remember_session(self.ws, engine.SESSION, sid)
+        folder = engine.transcripts(self.ws)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, sid + ".jsonl")
+        try:
+            with open(path, "w") as fh:
+                fh.write("{}\n")
+            old = time.time() - engine.WINDOW_IDLE - 60
+            os.utime(path, (old, old))                                      # untouched for a while
+            engine.mark(self.ws, "chat", who="Alex")
+            self.assertFalse(engine.wait_for_window(self.ws))              # goes ahead at once
+            res = engine.run(self.emp, "hi", job="brief")
+            self.assertTrue(res["ok"], res)
+            self.assertIn("--fork-session", self.argv())                   # on a copy: the owner's window keeps main
+            self.assertEqual(engine.main_session(self.ws), sid)
+        finally:
+            engine.unmark(self.ws, "chat")
+            os.remove(path)
+
+    def test_a_dead_window_is_forgotten(self):
+        p = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True)
+        dead = int(p.stdout.strip())
+        os.makedirs(os.path.join(self.ws, "state"), exist_ok=True)
+        with open(os.path.join(self.ws, "state", "chat.json"), "w") as fh:
+            json.dump({"pid": dead, "since": "x"}, fh)
+        self.assertIsNone(engine.window_open(self.ws))
+        self.assertFalse(os.path.exists(os.path.join(self.ws, "state", "chat.json")))
+
+    @POSIX_FAKE_RUN
+    def test_the_busy_marker_while_a_run_is_on(self):
+        self.fake(sleep=1.5)
+        seen = []
+        threading.Timer(0.6, lambda: seen.append(engine.busy(self.ws))).start()
+        res = engine.run(self.emp, "hi", job="brief")
+        self.assertTrue(res["ok"], res)
+        time.sleep(0.1)
+        self.assertEqual(seen[0]["job"], "brief")
+        self.assertEqual(seen[0]["pid"], os.getpid())
+        self.assertIsNone(engine.busy(self.ws))
+
+    def test_inbox_unread_and_seen(self):
+        team.feed("tess", "Tess", "Alex", "Standup: 3 things.", "job")
+        team.feed("tess", "Tess", "team", "For everyone.", "job")
+        team.feed("owner", "Alex", "tess", "Thanks", "panel")             # the owner's own words aren't unread
+        team.feed("tess", "Tess", "Omar", "Not for Alex.", "bus")
+        rows = team.unread("Alex")
+        self.assertEqual([r["body"] for r in rows], ["Standup: 3 things.", "For everyone."])
+        self.assertEqual(len(team.unread("alex", "tess")), 2)
+        team.mark_seen("Alex")
+        self.assertEqual(team.unread("Alex"), [])
+        team.feed("tess", "Tess", "Alex", "End of day: shipped.", "job")
+        self.assertEqual([r["body"] for r in team.unread("Alex")], ["End of day: shipped."])
+
+
+class DataRoot(unittest.TestCase):
+    """T034: transcript, context and window discovery follow the exact effective Claude data root.
+    An inherited CLAUDE_CONFIG_DIR is authoritative; ~/.claude is only the default. The path is
+    never persisted or logged."""
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex")
+        self.emp = engine.employee("tess")
+        self.ws = self.emp["workspace"]
+        self.sid = "44444444-5555-6666-7777-888888888888"
+        engine.remember_session(self.ws, engine.SESSION, self.sid)
+        self.root = tempfile.mkdtemp(dir=TMP, prefix="claude-root-")
+        self.real_env = os.environ.get("CLAUDE_CONFIG_DIR")
+
+    def tearDown(self):
+        if self.real_env is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self.real_env
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    @staticmethod
+    def env(root):
+        return {"CLAUDE_CONFIG_DIR": root}
+
+    def write_transcript(self, root, ctx=170_000):
+        folder = engine.transcripts(self.ws, self.env(root))
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, self.sid + ".jsonl")
+        with open(path, "w") as fh:
+            fh.write(json.dumps({"type": "assistant", "message": {"usage": {
+                "input_tokens": 10, "cache_read_input_tokens": ctx - 20,
+                "cache_creation_input_tokens": 10}}}) + "\n")
+        return path
+
+    def test_default_data_root_is_home_claude(self):
+        self.assertEqual(engine.claude_data_root({}), os.path.expanduser("~/.claude"))
+        self.assertEqual(engine.transcripts(self.ws, {}),
+                         os.path.join(os.path.expanduser("~/.claude"), "projects",
+                                      re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(self.ws))))
+
+    def test_custom_root_owns_transcript_context_and_windows(self):
+        self.write_transcript(self.root)
+        env = self.env(self.root)
+        self.assertEqual(engine.context_tokens(self.ws, self.sid, env), 170_000)
+        self.assertTrue(engine.fresh_start({engine.SESSION: self.sid, engine.SESSION + "_day": "2026-11-09"},
+                                           self.ws, today="2026-11-10", env=env))
+        self.assertLess(engine.window_idle(self.ws, env), 60)          # the transcript just written
+        sessions = os.path.join(self.root, "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        with open(os.path.join(sessions, "window.json"), "w") as fh:
+            json.dump({"sessionId": self.sid, "pid": os.getpid(), "entrypoint": "claude"}, fh)
+        self.assertEqual(engine.window_open(self.ws, env), {"since": "", "kind": "claude"})
+
+        other = tempfile.mkdtemp(dir=TMP, prefix="claude-other-")
+        try:                                                           # another data root sees none of it
+            self.assertEqual(engine.context_tokens(self.ws, self.sid, self.env(other)), 0)
+            self.assertIsNone(engine.window_open(self.ws, self.env(other)))
+            self.assertEqual(engine.window_idle(self.ws, self.env(other)), 0)
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+
+    def test_inherited_data_root_reaches_the_child_and_stays_out_of_state(self):
+        os.environ["CLAUDE_CONFIG_DIR"] = self.root
+        os.environ["CLAUDECODE"] = "1"                                # the recursion marker is the only removal
+        self.addCleanup(os.environ.pop, "CLAUDECODE", None)
+        env = engine.clean_env(self.emp)
+        self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), self.root)     # exact child environment keeps it
+        self.assertNotIn("CLAUDECODE", env)
+        self.assertEqual(engine.claude_data_root(env), self.root)
+        self.assertEqual(engine.claude_data_root(), self.root)        # no-argument lookup is the same root
+        for f in (os.path.join(TMP, "staff.json"), os.path.join(self.ws, "state", "sessions.json")):
+            with open(f, encoding="utf-8") as fh:
+                self.assertNotIn(self.root, fh.read(), f)             # the path is never persisted
+
+
+class ScopedUnread(unittest.TestCase):
+    """T035: an owner reading one employee's chat must not clear another employee's report, even
+    when both reports share a timestamp and older global cursor state already exists."""
+
+    TS = "2026-11-10 10:00:00"
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex")
+        hire.hire("Omar", "Social", supervisor="Alex")
+
+    def report(self, rid, emp, body):
+        team.append(team.FEED, {"id": rid, "ts": self.TS, "from_id": emp,
+                                "from_name": emp.capitalize(), "to_id": "Alex", "body": body, "channel": "job"})
+
+    def bodies(self, *a):
+        return [r["body"] for r in team.unread(*a)]
+
+    def test_filtered_view_keeps_the_other_report_unread(self):
+        self.report("tess00000001", "tess", "Tess report")
+        self.report("omar00000001", "omar", "Omar report")
+        self.assertEqual(self.bodies("Alex"), ["Tess report", "Omar report"])
+        team.mark_seen("Alex", "tess")                                # the panel's employee chat
+        self.assertEqual(self.bodies("Alex", "tess"), [])
+        self.assertEqual(self.bodies("Alex"), ["Omar report"])        # not cleared by the filtered view
+        team.mark_seen("Alex")                                        # the full room: global
+        self.assertEqual(self.bodies("Alex"), [])
+
+    def test_old_global_cursor_at_the_same_second_does_not_hide_new_reports(self):
+        team.jsave(team.STATEF, {"seen:alex": self.TS, "seen_ids:alex": ["old000000001"]})
+        self.report("tess00000002", "tess", "New Tess report")
+        self.report("omar00000002", "omar", "New Omar report")
+        self.assertEqual(self.bodies("Alex"), ["New Tess report", "New Omar report"])
+        team.mark_seen("Alex", "omar")
+        self.assertEqual(self.bodies("Alex"), ["New Tess report"])
+        self.assertEqual(self.bodies("Alex", "omar"), [])
+
+
+class ClaudeApp(unittest.TestCase):
+    """0.11: a crew member's thinking routines run as the Claude app's scheduled tasks and report in its chat."""
+
+    def setUp(self):
+        fresh_team()
+        hire.hire("Tess", "Research", supervisor="Alex", picked=["web", "standup", "eod", "review", "brief"])
+        self.ws = engine.employee("tess")["workspace"]
+
+    def test_cron_follows_the_owners_week(self):
+        import claudeapp
+        self.assertEqual(claudeapp.cron({"at": "09:00", "days": "work"}), "0 9 * * 1,2,3,4,5")
+        self.assertEqual(claudeapp.cron({"at": "15:30", "days": "last_workday"}), "30 15 * * 5")
+        self.assertEqual(claudeapp.cron({"at": "19:00", "days": "daily"}), "0 19 * * *")
+        self.assertEqual(claudeapp.cron({"at": "10:00", "days": "Fri"}), "0 10 * * 5")
+        reg = engine.registry()
+        reg["workdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu"]
+        engine.save_registry(reg, "Sun–Thu")
+        self.assertEqual(claudeapp.cron({"at": "09:00", "days": "work"}), "0 9 * * 0,1,2,3,4")
+        self.assertEqual(claudeapp.cron({"at": "15:00", "days": "last_workday"}), "0 15 * * 4")
+        reg["workdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        engine.save_registry(reg, "every day")
+        self.assertEqual(claudeapp.cron({"at": "17:00", "days": "work"}), "0 17 * * *")
+
+    def test_the_plan_has_the_thinking_routines_and_how_they_report(self):
+        import claudeapp
+        p = claudeapp.write_plan("tess")
+        jobs = [t["job"] for t in p["tasks"]]
+        self.assertEqual(sorted(jobs), ["eod", "review", "standup"])          # not the brief: it stays in the service
+        st = next(t for t in p["tasks"] if t["job"] == "standup")
+        self.assertEqual((st["task_id"], st["title"], st["cron"]), ("tess-standup", "Tess · Standup", "0 9 * * 1,2,3,4,5"))
+        self.assertIn("alarm", st["prompt"])                                   # the run only wakes the chat…
+        self.assertIn("state/claude_app.json", st["prompt"])
+        self.assertIn("SendMessage", st["prompt"])
+        self.assertIn(st["message"], st["prompt"])
+        self.assertIn(os.path.join(engine.CORE, "jobs", "standup.md"), st["message"])   # …which does the standup itself
+        self.assertIn("for Alex", st["message"])
+        self.assertNotIn("{", st["prompt"])
+        with open(os.path.join(self.ws, "state", "claude_app_plan.json")) as fh:
+            self.assertEqual(json.load(fh)["version"], p["version"])
+        self.assertEqual(claudeapp.write_plan("tess")["version"], p["version"])  # same plan, same version
+
+    def test_routines_in_the_app_are_left_to_the_app(self):
+        import claudeapp
+        self.assertEqual((claudeapp.owned("tess"), claudeapp.chat_link("tess")), (set(), None))
+        p = claudeapp.write_plan("tess")
+        sid = "local_12345678-1234-1234-1234-123456789abc"
+        with open(os.path.join(self.ws, "state", "claude_app.json"), "w") as fh:
+            json.dump({"chat": sid, "routines": ["standup", "eod", "brief"], "plan": p["version"]}, fh)
+        self.assertEqual(claudeapp.owned("tess"), {"standup", "eod"})          # only thinking routines move
+        self.assertEqual(claudeapp.chat_link("tess"), "claude://claude.ai/epitaxy/" + sid)
+        self.assertFalse(claudeapp.stale("tess"))
+        reg = engine.registry()
+        reg["workdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu"]
+        engine.save_registry(reg, "Sun–Thu")
+        claudeapp.write_plan("tess")
+        self.assertTrue(claudeapp.stale("tess"))                               # times changed: the chat updates its tasks
+        with open(os.path.join(self.ws, "state", "claude_app.json"), "w") as fh:
+            json.dump({"chat": "../../somewhere", "routines": ["standup"]}, fh)
+        self.assertEqual(claudeapp.owned("tess"), set())                       # not a chat id: ignored
+
+    def test_the_service_skips_what_the_app_runs(self):
+        import datetime as dt
+        import staffd
+        import awake
+        sid = "local_12345678-1234-1234-1234-123456789abc"
+        with open(os.path.join(self.ws, "state", "claude_app.json"), "w") as fh:
+            json.dump({"chat": sid, "routines": ["standup", "eod", "review"]}, fh)
+        started = []
+        real = (awake.settled, staffd.run_async, staffd.dt)
+
+        class Now(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return dt.datetime(2026, 11, 9, 9, 1)                         # Monday 09:01: brief and standup are due
+
+        class D:
+            datetime, timedelta = Now, dt.timedelta
+        awake.settled = lambda: True
+        staffd.run_async = lambda k, prompt, job, *a, **kw: started.append(job)
+        staffd.dt = D
+        try:
+            with open(os.path.join(self.ws, "state", "schedule.json"), "w") as fh:
+                json.dump({"brief": "2026-11-08", "standup": "2026-11-08"}, fh)
+            staffd.tick_jobs()
+        finally:
+            awake.settled, staffd.run_async, staffd.dt = real
+        self.assertIn("brief", started)
+        self.assertNotIn("standup", started)
+
+
+class Desk(unittest.TestCase):
+    """0.12: Orbit's own chat in the Claude app: hire, check and change the crew by talking."""
+
+    def setUp(self):
+        fresh_team()
+        import desk
+        self.desk = desk
+        self.sent = []
+        self.real_order = desk.order
+        desk.order = lambda kind, payload: (self.sent.append((kind, payload)) or
+                                            ("Hire Sara (Market researcher): Hired: handle /sara" if kind == "hire" else "ok"))
+
+    def tearDown(self):
+        self.desk.order = self.real_order
+
+    def test_the_desk_folder_and_its_locks(self):
+        d = self.desk.ensure()
+        self.assertEqual(d, os.path.join(TMP, "desk"))
+        self.assertNotIn(d, [os.path.join(TMP, "employees", x) for x in os.listdir(os.path.join(TMP, "employees"))]
+                         if os.path.isdir(os.path.join(TMP, "employees")) else [])
+        with open(os.path.join(d, "CLAUDE.md")) as fh:
+            text = fh.read()
+        self.assertIn(os.path.join(engine.KIT, "orbit"), text)
+        self.assertIn("Alex", text)
+        self.assertNotIn("{orbit}", text)
+        with open(os.path.join(d, ".claude", "settings.local.json")) as fh:
+            perms = json.load(fh)["permissions"]
+        def rule(kind, p, suffix=""):
+            p = os.path.realpath(p)
+            p = "//" + p.replace("\\", "/") if osinfo.KIND == "windows" else "/" + p
+            return "%s(%s%s)" % (kind, p, suffix)
+        self.assertIn(rule("Read", engine.SECRETS, "/**"), perms["deny"])
+        self.assertIn(rule("Edit", engine.REGISTRY), perms["deny"])
+        self.assertFalse(os.path.exists(os.path.join(TMP, "CLAUDE.md")))      # not above the crew's folders
+        url, new = self.desk.link()
+        self.assertTrue(new and url.startswith("claude://code/new?folder="))
+        with open(self.desk.STATE, "w") as fh:
+            json.dump({"chat": "local_12345678-1234-1234-1234-123456789abc"}, fh)
+        self.assertEqual(self.desk.link(), ("claude://claude.ai/epitaxy/local_12345678-1234-1234-1234-123456789abc", False))
+
+    def test_the_guide_is_the_panels_interview(self):
+        import onboard
+        g = self.desk.guide()
+        for part in (onboard.ASK_GUIDE, onboard.CARD_GUIDE, onboard.POLICY, "- jobs: ", "- web: ", "orbit hire --card"):
+            self.assertIn(part, g)
+
+    def test_hire_from_a_card_goes_through_the_service(self):
+        out = self.desk.hire({"name": "Sara", "role": "Market researcher", "job": "researcher",
+                              "card": {"role": "Market researcher", "scope": "Prices in Cairo", "first_task": "Three rivals",
+                                       "routines": {"standup": True, "eod": True, "brief": False}, "abilities": ["web", "bogus"],
+                                       "budget": "huge", "model": "opus", "access": [{"kind": "sign_in", "what": "x", "why": "y"},
+                                                                                    {"kind": "pay", "what": "no", "why": "no"}]},
+                              "browser": {"sites": ["YouTube.com"], "approval": "sometimes"}})
+        kinds = [k for k, _ in self.sent]
+        self.assertEqual(kinds, ["hire", "set_autonomy", "set_browser"])
+        h = self.sent[0][1]
+        self.assertEqual((h["name"], h["supervisor"], h["model"]), ("Sara", "Alex", "opus"))
+        self.assertEqual(h["abilities"], ["telegram", "team_room", "web", "standup", "eod"])   # unknown ability dropped
+        self.assertEqual((h["card"]["budget"], h["card"]["weekly_tokens"]), ("regular", 3_000_000))
+        self.assertEqual([a["kind"] for a in h["card"]["access"]], ["sign_in"])
+        self.assertEqual(self.sent[2][1], {"employee_id": "sara", "sites": ["youtube.com"], "approval": "each"})
+        self.assertIn("handle sara", out)
+        with self.assertRaises(ValueError):
+            self.desk.hire({"card": {}})
+
 
 if __name__ == "__main__":
     unittest.main()

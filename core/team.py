@@ -100,6 +100,72 @@ def feed(from_id, from_name, to_id, body, channel, receipt=None):
     append(FEED, rec)
 
 
+def _owner_key(name) -> str:
+    return str(name).lower()
+
+
+def _cursor(st, name, emp_id=None):
+    """(timestamp, ids) for the owner's global cursor or one employee's cursor."""
+    owner = _owner_key(name)
+    if emp_id:
+        return (st.get("seen_emp:%s:%s" % (emp_id, owner), ""),
+                set(st.get("seen_emp_ids:%s:%s" % (emp_id, owner), [])))
+    return (st.get("seen:%s" % owner, ""),
+            set(st.get("seen_ids:%s" % owner, [])))
+
+
+def unread(name, emp_id=None):
+    """What the crew said to an owner that they haven't seen yet: routine reports, order results, answers in the
+    team room. `name` is the owner's name as crew members address it (the supervisor field). A message is seen
+    when either the newer global cursor or that employee's own cursor has reached it."""
+    st = jload(STATEF, {})
+    g_ts, g_ids = _cursor(st, name)
+    per_emp, mine = {}, (str(name).lower(), "team", "all", "owner", "owners")
+    emps = engine.registry().get("employees", {})
+    out = []
+    for r in tail(FEED, 400):
+        if r.get("from_id") not in emps or (emp_id and r.get("from_id") != emp_id):
+            continue
+        if str(r.get("to_id", "")).lower() not in mine:
+            continue
+        ts, rid = r.get("ts", ""), r.get("id")
+        if ts < g_ts or (ts == g_ts and rid in g_ids):
+            continue
+        eid = r.get("from_id")
+        if eid not in per_emp:
+            per_emp[eid] = _cursor(st, name, eid)
+        e_ts, e_ids = per_emp[eid]
+        if e_ts and (ts < e_ts or (ts == e_ts and rid in e_ids)):
+            continue
+        out.append(r)
+    return out
+
+
+def mark_seen(name, emp_id=None):
+    """The owner has looked (the panel, `orbit inbox`, `orbit chat`). With no employee this advances the
+    global cursor; with an employee it advances only that employee's cursor, so another crew member's
+    report stays unread."""
+    rows = tail(FEED, 400)
+    if emp_id:
+        rows = [r for r in rows if r.get("from_id") == emp_id]
+    latest = max((r.get("ts", "") for r in rows), default="")
+    st = jload(STATEF, {})
+    owner = _owner_key(name)
+    if emp_id:
+        ts_key, ids_key = "seen_emp:%s:%s" % (emp_id, owner), "seen_emp_ids:%s:%s" % (emp_id, owner)
+    else:
+        ts_key, ids_key = "seen:%s" % owner, "seen_ids:%s" % owner
+    current = st.get(ts_key, "")
+    ids = [r.get("id") for r in rows if r.get("ts", "") == latest]
+    if latest > current:
+        st[ts_key], st[ids_key] = latest, ids
+    elif latest == current and latest:
+        st[ids_key] = sorted(set(st.get(ids_key, [])) | set(ids))
+    else:
+        return
+    jsave(STATEF, st)
+
+
 def order_log(by, kind, summary, status, result=""):
     append(ORDERS, {"id": uuid.uuid4().hex[:12], "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "by": by,
                     "kind": kind, "summary": summary[:300], "status": status, "result": str(result)[:500]})
@@ -269,7 +335,8 @@ def routine_slot():
 
 def run_async(emp_id, prompt, job, session_key, deliver_to, who="", on_done=None, extra_env=None, said=None, channel=None,
               retry=None):
-    """Runs an employee in the background (one run at a time each). on_done(output) gets the final text.
+    """Runs an employee in the background (one run at a time each), as a new turn of its one running conversation
+    (`session_key` None; a name keeps a separate thread). on_done(output) gets the final text.
     `said` is the owner's own words (for the chat log); the prompt wraps them. A routine that fails because this
     computer was offline or the Claude usage limit was hit calls retry() instead of telling anyone: it runs again later."""
     if job == "chat":
@@ -285,6 +352,8 @@ def run_async(emp_id, prompt, job, session_key, deliver_to, who="", on_done=None
                 return
             if routine:
                 DOING[emp_id] = "Waiting for a free slot for %s" % LABELS.get(job, job)
+                engine.wait_for_window(emp["workspace"], lambda w: DOING.__setitem__(   # the owner is talking to them
+                    emp_id, "Waiting: %s has my chat window open (%s is next)" % (emp.get("supervisor") or "the owner", LABELS.get(job, job))))
                 routine_slot().acquire()
             DOING[emp_id] = ("Talking with %s" % who) if job == "chat" and who else "Working on %s" % LABELS.get(job, job)
             LIVE[emp_id] = {"doing": DOING[emp_id], "started": time.strftime("%Y-%m-%dT%H:%M:%S"), "steps": []}
@@ -351,7 +420,7 @@ def to_room(emp_id, name, to, channel):
             feed(emp_id, name, to, out, channel, receipt=LAST.get(emp_id))
             if channel == "job" and not any(owner_address(k) for k in engine.registry().get("owners", {})):
                 import osinfo
-                osinfo.notify("%s · Orbit" % name, out)
+                osinfo.notify("%s · Orbit" % name, out, more="orbit inbox")
     return post
 
 
@@ -360,15 +429,13 @@ def now_str():
 
 
 def chat_prompt(who, where, text, extra=""):
-    return ("[Message from %s (owner) in %s, %s local time]\n%s\n%s\n\nFollow CLAUDE.md and the handbook. Your "
-            "final answer is sent to them verbatim (plain text; add 'ATTACH: <path in your folder>' to send a file). "
-            "Update your memory files before you finish." % (who, where, now_str(), text, extra))
+    return ("[Message from %s (owner) in %s, %s local time]\n%s\n%s\n\nYour final answer goes to them verbatim (plain "
+            "text; 'ATTACH: <path in your folder>' on its own line sends a file)." % (who, where, now_str(), text, extra))
 
 
 def panel_prompt(who, text, team):
-    return ("[Message from %s (owner) %sin the control panel's team room, %s local time]\n%s\n\nFollow CLAUDE.md and "
-            "the handbook. Your final answer is posted in the team room (plain text), where the owners read it.%s "
-            "Update your memory files before you finish."
+    return ("[Message from %s (owner) %sin the control panel's team room, %s local time]\n%s\n\nYour final answer is "
+            "posted in the team room (plain text), where the owners read it.%s"
             % (who, "to the whole team " if team else "", now_str(), text,
                " Reply SILENT unless it's meant for you or you have something useful to add." if team else ""))
 

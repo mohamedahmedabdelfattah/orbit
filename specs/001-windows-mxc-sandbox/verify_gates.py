@@ -100,11 +100,12 @@ def cmd_ci():
     text = read(WF)
     if "windows-latest" not in text:
         problems.append("no windows-latest job in tests.yml")
-    hint = "MXC containment itself is not part of automated testing"
-    if hint not in text:
-        problems.append("no MXC-not-automated hint comment in tests.yml")
-    elif "specs/001-windows-mxc-sandbox/quickstart.md" not in text:
-        problems.append("hint does not point to quickstart.md")
+    if "hosted CI runners cannot supply the required Windows 11 x64/ARM64 containment evidence" not in text:
+        problems.append("workflow does not distinguish hosted unit coverage from required real-host evidence")
+    if "Product readiness" not in text or "remains blocked" not in text:
+        problems.append("workflow does not keep native-Windows product readiness blocked")
+    if "specs/001-windows-mxc-sandbox/quickstart.md" not in text:
+        problems.append("workflow evidence note does not point to quickstart.md")
     if problems:
         fail(problems)
     print("ci verification passed")

@@ -15,12 +15,16 @@ import unittest
 TMP = tempfile.mkdtemp(prefix="orbit-mxc-test-")
 os.environ["STAFFROOM_HOME"] = TMP
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(KIT, "core"))
 sys.path.insert(0, os.path.join(KIT, "core", "tools"))
 
+import _cleanup  # noqa: E402
 import engine  # noqa: E402
 import mxc  # noqa: E402
 import osinfo  # noqa: E402
+
+_cleanup.on_exit(TMP)
 
 
 def set_kind(kind):

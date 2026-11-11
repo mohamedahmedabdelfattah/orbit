@@ -13,6 +13,9 @@ import time
 import unittest
 
 TMP = tempfile.mkdtemp(prefix="orbit-calls-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cleanup  # noqa: E402
+_cleanup.on_exit(TMP)                      # nothing left behind: temp folders, transcripts
 os.environ["STAFFROOM_HOME"] = TMP
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(KIT, "core"))
@@ -85,7 +88,8 @@ class Transcript(unittest.TestCase):
         said = {0: [(1, "Thirty one dollars a kilo from December.")]}
         calls._whisper = lambda a, prompt="": said[0] if len(a) else []
         calls._consume(st, final=True)
-        body = open(st["transcript_abs"]).read()
+        with open(st["transcript_abs"]) as fh:
+            body = fh.read()
         self.assertIn("[00:00:01] Them: Thirty one dollars a kilo from December.", body)
         self.assertNotIn("You:", body)                 # the mic heard the speakers: not counted twice
         self.assertEqual(st["lines"], 1)
@@ -116,7 +120,8 @@ class Transcript(unittest.TestCase):
         info = calls._finish(st)
         self.assertFalse(os.path.exists(st["audio"]))
         self.assertEqual(ended[0]["transcript"], "transcript.md")
-        self.assertIn(osinfo.local("min · heard on this Mac"), open(st["transcript_abs"]).read())
+        with open(st["transcript_abs"]) as fh:
+            self.assertIn(osinfo.local("min · heard on this Mac"), fh.read())
         self.assertNotIn("lina", calls.CALLS)
         self.assertEqual(info["lines"], 1)
 
@@ -125,7 +130,8 @@ class Transcript(unittest.TestCase):
         st = state(self.d, on_end=lambda eid, info: ended.append(info))
         calls.CALLS["lina"] = st
         calls._finish(st)
-        self.assertIn("Nothing was heard", open(st["transcript_abs"]).read())
+        with open(st["transcript_abs"]) as fh:
+            self.assertIn("Nothing was heard", fh.read())
         self.assertEqual(ended, [])
 
 

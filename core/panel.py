@@ -126,7 +126,8 @@ def members():
                     "tokens_today": s["tokens_today"], "tokens_7d": s["tokens_7d"], "weekly_tokens": int(m.get("weekly_tokens") or 0),
                     "runs_7d": s["runs_7d"], "failures_7d": s["failures_7d"], "card": m.get("card") or {}, "browser": m.get("browser") or {},
                     "abilities": sorted(abilities.effective(k)), "abilities_on": len(abilities.effective(k)), "abilities_total": total,
-                    "model": m.get("model") or emp.get("model", "sonnet"), "effort": m.get("effort") or emp.get("effort", "medium"),
+                    "model": m.get("model") or emp.get("model", "sonnet"), "brain": m.get("brain") or emp.get("brain") or "opus",
+                    "effort": m.get("effort") or emp.get("effort", "medium"),
                     "plan": plan.summary(k), "learned": rolebook.stats(k), "shared_as": m.get("shared_as") or "", "cloud": cloud.status(k)})
     return out
 
@@ -264,17 +265,47 @@ def demo_interview(step, name, role):
 
 
 def claude_session(emp_id):
-    """Readies the crew member's folder (engine.claude_session) and, on a Mac, opens a Claude app session there."""
+    """Opens the owner's window on the crew member's own running conversation: a terminal running `orbit chat
+    <handle>` (a Claude Code window on the same session its routines use, so everything it did and said is there,
+    and what the owner says there it remembers). Readies the folder first (engine.claude_session), so a Claude
+    window opened there by hand has the same locks, even though that one is a separate conversation."""
     if emp_id not in engine.registry().get("employees", {}):
         raise orders.OrderError("No such crew member")
     if DEMO:
-        raise orders.OrderError("Not in the demo: in your own Orbit this opens a Claude session as them.")
-    try:
-        s = engine.claude_session(emp_id)
-    except RuntimeError as e:
-        raise orders.OrderError(str(e))
-    opened = osinfo.KIND == "mac" and osinfo.open_url(s["link"])
-    return {"ok": True, "link": s["link"], "folder": s["folder"], "opened": bool(opened), "hello": s["hello"]}
+        raise orders.OrderError("Not in the demo: in your own Orbit this opens their conversation in Claude.")
+    emp = engine.employee(emp_id)
+    if osinfo.KIND == "windows":
+        # Native employee Desktop sessions stay gated pending feature 003. The contained terminal
+        # conversation is the supported Windows surface; a WSL2-mode machine refuses even that.
+        try:
+            engine.require_employee_launch(emp, "terminal")
+        except RuntimeError as e:
+            raise orders.OrderError(str(e))
+        s = {"folder": emp["workspace"], "link": "", "new_chat": False}
+    else:
+        import claudeapp
+        try:
+            s = claudeapp.open_chat(emp_id)               # their chat in the Claude app, or a new one that sets itself up
+        except RuntimeError as e:
+            raise orders.OrderError(str(e))
+    argv = [os.path.join(engine.KIT, "orbit"), "chat", emp_id]
+    cmd = osinfo.display_argv(argv)
+    b = engine.busy(emp["workspace"])
+    opened, how = bool(s.get("opened")), "app"
+    if not opened:
+        how, opened = "terminal", osinfo.open_terminal(argv, name="chat-" + emp_id)
+    return {"ok": True, "command": cmd, "folder": s["folder"], "opened": bool(opened), "link": s.get("link") or "",
+            "how": how, "new_chat": bool(s.get("new_chat")),
+            "busy": team.LABELS.get(b.get("job"), b.get("job")) if b else None}
+
+
+def desk_session():
+    """Opens Orbit's own chat in the Claude app (the front desk), or a new one that sets itself up."""
+    if DEMO:
+        raise orders.OrderError("Not in the demo: in your own Orbit this opens Orbit's chat in Claude.")
+    import desk
+    r = desk.open_chat()
+    return {"ok": True, **r}
 
 
 def setup_state(emps):
@@ -387,7 +418,7 @@ def state():
                                        for i, o in reg.get("owners", {}).items()],
             "employees": emps, "feed": feed, "orders": ords,
             "pending": [{"id": i, **p} for i, p in pending.items()],
-            "needs": needs_you(emps, ords, pending, usage), "checklist": checklist(emps, feed),
+            "needs": needs_you(emps, ords, pending, usage), "checklist": checklist(emps, feed), "unread": len(team.unread(me)),
             "working": dict(team.DOING), "jobs": team.JOBS, "labels": team.LABELS, "setup": setup_state(emps),
             "live": {k: {**v, "steps": list(v.get("steps", []))} for k, v in list(team.LIVE.items())},
             "calls": calls.status(),
@@ -431,7 +462,8 @@ def employee_detail(emp_id):
                     st = os.stat(p)
                 except OSError:
                     continue
-                files.append({"path": os.path.relpath(p, ws), "size": st.st_size, "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
+                rel = os.path.relpath(p, ws).replace(os.sep, "/")   # the panel/JS uses URL paths on every OS
+                files.append({"path": rel, "size": st.st_size, "mtime": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime)),
                               "text": n.lower().endswith(TEXT_EXT)})
                 if len(files) >= 400:
                     break
@@ -496,8 +528,14 @@ def skill_action(f, me):
 def read_file(emp_id, rel):
     emp = engine.employee(emp_id)
     ws = os.path.realpath(emp["workspace"])
-    p = os.path.realpath(os.path.join(ws, rel))
-    if not p.startswith(ws + os.sep) or any(part in (".git", ".claude", "state") for part in rel.split(os.sep)):
+    rel = str(rel or "").replace("\\", "/").strip()      # one separator grammar on every OS
+    parts = [part for part in rel.split("/") if part]
+    if (not parts or rel.startswith("/") or re.match(r"^[A-Za-z]:", rel)
+            or any(part in (".", "..", ".git", ".claude", "state") for part in parts)):
+        raise orders.OrderError("Not a file you can open here")
+    rel = "/".join(parts)
+    p = os.path.realpath(os.path.join(ws, *parts))
+    if not p.startswith(ws + os.sep):
         raise orders.OrderError("Not a file you can open here")
     if not p.lower().endswith(TEXT_EXT) or not os.path.isfile(p):
         raise orders.OrderError("Only text files open in the panel")
@@ -804,6 +842,14 @@ class Handler(BaseHTTPRequestHandler):
                     raise orders.OrderError(str(ex) or "Claude didn't answer; try again")
             if path == "/api/claude_session":
                 return self._json(200, claude_session(str(f.get("employee") or "")))
+            if path == "/api/desk":
+                return self._json(200, desk_session())
+            if path == "/api/seen":                     # full room: global; employee chat: only that cursor
+                emp = str(f.get("employee") or "")
+                if emp and emp not in engine.registry().get("employees", {}):
+                    return self._json(404, {"error": "No such employee"})
+                team.mark_seen(me, emp or None)
+                return self._json(200, {"ok": True})
             if path == "/api/connect":
                 return self._json(200, connect(f, me))
             if path == "/api/pairing" and f.get("channel") in channels.NAMES:

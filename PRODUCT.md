@@ -1,9 +1,19 @@
 # Product
 
-**Current platform release (0.8.0):** Native Windows 11 is a first-class path. Crew shell commands
-run in Microsoft Execution Containers (MXC), with WSL2 retained as an explicit fallback. Orbit-side
-policy and fallback behavior are covered by automated tests; real-host MXC validation is optional and
-documented in `specs/001-windows-mxc-sandbox/quickstart.md`.
+**Current product version (0.12.0):** Native Windows 11 source support uses Microsoft Execution
+Containers (MXC) for crew shell commands, with WSL2 retained as an explicit fallback. Product-release
+readiness remains blocked: feature 003's required containment implementation and candidate-bound x64
+and ARM64 real-host evidence are absent. Historical quickstart output is not a substitute, and the
+required real-host evidence is not optional.
+
+## Runtime connection and model roles
+
+Ordinary local work uses Claude's configured connection through the installed Claude Code client.
+Orbit does not infer a subscription from the persisted `auth == "subscription"` compatibility value,
+and usage limits are shown only when Claude reports them. The legacy stored Anthropic API key remains
+an explicit compatibility mode. Cloud Shift is separate and requires its own qualifying account
+evidence. Brain and hands select model roles for thinking/chat and production work; they do not route
+ordinary work to a provider.
 
 ## Register
 
@@ -41,7 +51,7 @@ quiet elsewhere, native in both light and dark appearance.
 - **What needs me, first.** The home view leads with decisions and blockers, then with what happened.
 - **One vocabulary.** The same button, select, list and badge everywhere; status shown the same way on
   every screen.
-- **Numbers are honest.** Plan use is labelled as plan use, never as a bill; failures are shown, not
+- **Numbers are honest.** Token use is labelled as token use, never as a bill; failures are shown, not
   smoothed over.
 - **Density where it earns it.** Lists and the abilities matrix are dense; the home view breathes.
 - **Nothing to learn.** Standard Mac conventions, keyboard-friendly, readable empty states that say

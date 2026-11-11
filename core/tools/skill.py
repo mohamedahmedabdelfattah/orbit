@@ -85,7 +85,7 @@ def main():
                     text = fh.read()
             d = skillbook.create(emp, a.name, a.description, text, by=a.taught_by or "self",
                                  how="taught" if a.taught_by else "learned", when=a.when)
-            rel = os.path.relpath(d, _kit.workspace())
+            rel = os.path.relpath(d, _kit.workspace()).replace(os.sep, "/")
             if text:
                 print("Saved %s/SKILL.md. It loads on your next run." % rel)
             else:

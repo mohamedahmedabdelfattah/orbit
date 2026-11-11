@@ -13,6 +13,11 @@ import json
 import os
 import tempfile
 
+try:                                                     # test modules import this both ways
+    from . import _cleanup
+except ImportError:
+    import _cleanup
+
 DRIVER = r'''# the fake Claude Code: records, then answers only what control.json allows
 import json, os, sys
 
@@ -102,6 +107,7 @@ def install(directory=None, version=None, auth=None, prompt=None, admin=None):
     harmless defaults (`--version` succeeds, account status says signed out, `-p` succeeds,
     `plugin` administration reports already-installed)."""
     d = directory or tempfile.mkdtemp(prefix="fake-claude-")
+    _cleanup.on_exit(d)                                 # never leave a full-environment recorder behind
     os.makedirs(d, exist_ok=True)
     driver = os.path.join(d, "fake_claude.py")
     with open(driver, "w", encoding="utf-8", newline="\n") as fh:

@@ -2,10 +2,10 @@
 # Linux and Windows jobs also install Orbit the way a new user would (Claude Code installed, not signed
 # in: no Claude run here), check the sandbox really works, read a real scan with tesseract, and start
 # the service.
-# NOTE (MXC, T090): MXC containment itself is not part of automated testing — CI runners are Windows
-# Server, and MXC requires Windows 11 hosts. The fake-executor stubs cover Orbit-side logic; the native
-# `windows` unit job below runs the suite with no runtime present. For on-demand real-host validation
-# see specs/001-windows-mxc-sandbox/quickstart.md.
+# NOTE (MXC): hosted CI runners cannot supply the required Windows 11 x64/ARM64 containment evidence.
+# The fake-executor stubs and native-Windows unit job cover Orbit-side logic only. Product readiness
+# remains blocked on feature 003's implementation and candidate-bound real-host evidence; the older
+# specs/001-windows-mxc-sandbox/quickstart.md guide is not release proof.
 name: tests
 on:
   push:
@@ -50,6 +50,16 @@ jobs:
           curl -fsSL https://claude.ai/install.sh | bash
           export PATH="$HOME/.local/bin:$PATH"
           ./install.sh --yes
+      - name: Guard plugin tests (ten cases, no account or inference)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          python3 - <<'EOF'
+          from pathlib import Path
+          tests = Path("core/guard/staff-guard/tests/guard.test.ts").read_text().splitlines()
+          assert sum(line.startswith("test(") for line in tests) == 10
+          EOF
+          cd core/guard/staff-guard
+          claude plugin test
       - name: The service and the panel are up
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -61,8 +71,8 @@ jobs:
       - name: Building the speech engine (whisper.cpp)
         run: ./orbit doctor --get-whisper || true; test -x "$HOME/.local/bin/whisper-cli"
 
-  # Native Windows unit job (T090): unit suite only, with the fake-executor stubs — no MXC runtime is
-  # installed and no real container runs (see the note at the top about quickstart.md validation).
+  # Native Windows unit job: unit suite only, with fake-executor stubs — no MXC runtime is installed
+  # and no real container runs. This job cannot satisfy the real-host release gate described above.
   windows-unit:
     runs-on: windows-latest
     steps:

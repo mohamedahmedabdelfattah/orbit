@@ -26,6 +26,9 @@ KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TOOLS = os.path.join(KIT, "core", "tools")
 BIN = os.path.join(KIT, "bin")
 TMP = tempfile.mkdtemp(prefix="staff-tools-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cleanup  # noqa: E402
+_cleanup.on_exit(TMP)                      # nothing left behind: temp folders, transcripts
 HOME = os.path.join(TMP, "home")
 WS = os.path.join(TMP, "workspace")
 os.makedirs(HOME)
@@ -36,16 +39,32 @@ os.environ["STAFF_WORKSPACE"] = WS
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
-import _kit  # noqa: E402
+TOOL_DEPS_ERROR = ""
+try:
+    import requests  # noqa: F401, E402
+    import bs4  # noqa: F401, E402
+except ImportError as ex:
+    TOOL_DEPS_ERROR = str(ex)
 
-_kit.HOME = HOME            # in case another test module imported _kit first with a different home
-import fetch  # noqa: E402
-import browse  # noqa: E402
-import apify  # noqa: E402
-import watch  # noqa: E402
-import docs  # noqa: E402
+if not TOOL_DEPS_ERROR:
+    import _kit  # noqa: E402
+    _kit.HOME = HOME            # in case another test module imported _kit first with a different home
+    import fetch  # noqa: E402
+    import browse  # noqa: E402
+    import apify  # noqa: E402
+    import watch  # noqa: E402
+    import docs  # noqa: E402
+else:
+    _kit = fetch = browse = apify = watch = docs = None
+
+POSIX_FIXTURE = unittest.skipUnless(os.name == "posix", "needs POSIX executable and symlink fixtures")
 
 PUBLIC_IP = "93.184.215.14"   # an IP literal resolves offline; it is a global address
+
+
+def setUpModule():
+    if TOOL_DEPS_ERROR:
+        raise unittest.SkipTest("needs requests and beautifulsoup4: %s" % TOOL_DEPS_ERROR)
 
 
 def tearDownModule():
@@ -679,6 +698,7 @@ class DocsTests(Base):
         self.assertIn("Hello Staffroom 2026", pages[1])
         self.assertEqual(docs.pdf_page_count(self.pdf), 1)
 
+    @POSIX_FIXTURE
     def test_cli_saves_into_workspace(self):
         env = dict(os.environ, STAFFROOM_HOME=HOME, STAFF_WORKSPACE=WS)
         env.pop("STAFF_EMPLOYEE", None)
@@ -720,6 +740,7 @@ def _has(mod: str) -> bool:
 # Shims and live smoke tests
 
 
+@POSIX_FIXTURE
 class ShimTests(unittest.TestCase):
     def test_shims_exist_and_run(self):
         env = dict(os.environ, STAFFROOM_HOME=HOME, STAFF_WORKSPACE=WS)
@@ -744,6 +765,7 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+@POSIX_FIXTURE
 @unittest.skipUnless(online(), "offline")
 class LiveSmokeTests(unittest.TestCase):
     def run_tool(self, *args, timeout=120):

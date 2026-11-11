@@ -275,7 +275,7 @@ def handle(msg):
         team.feed(who, who, emp_id, body, "group")
         on_done = team.to_room(emp_id, emp["name"], who, "group")
     run_async(emp_id, team.chat_prompt(who, where, body, extra), "chat",
-              session_key=("group" if is_group else key), deliver_to=[chat], who=who, on_done=on_done, said=body,
+              session_key=None, deliver_to=[chat], who=who, on_done=on_done, said=body,
               channel="group" if is_group else ch)
 
 
@@ -334,7 +334,11 @@ def tick_jobs():
         st_f = os.path.join(emp["workspace"], "state", "schedule.json")
         st = jload(st_f, {})
         missed = []
+        import claudeapp
+        in_app = claudeapp.owned(k)                       # these run as the Claude app's tasks, in the owner's chat
         for job in abilities.jobs(k):
+            if job in in_app:
+                continue
             spec = team.job_spec(emp, job)
             due = team.last_due(spec, now) if spec else None
             if not due or st.get(job, "") >= due.strftime("%F") or st.get("wait:" + job, "") > stamp:
@@ -516,13 +520,21 @@ def supervise():
 def refresh_sessions():
     """After a start (so after every update): each crew member's folder gets the kit's current guard, settings
     and switches, so a Claude session opened there (from the panel, the app or a phone) is never a version behind."""
+    try:
+        import desk
+        desk.ensure()                                     # Orbit's own chat: its instructions follow the kit
+    except Exception as ex:  # noqa: BLE001
+        log("desk refresh: %s" % ex)
     for emp_id, e in engine.registry().get("employees", {}).items():
         if e.get("status") == "retired":
             continue
         try:
+            engine.require_employee_launch(e, "desktop")  # decide before plugin, settings or plan files are touched
             import hire
             hire.upgrade_workspace(emp_id)
             engine.claude_session(emp_id)
+            import claudeapp
+            claudeapp.write_plan(emp_id)                  # the routines its Claude chat sets up (or updates)
         except Exception as ex:  # noqa: BLE001
             log("session refresh %s: %s" % (emp_id, ex))
 

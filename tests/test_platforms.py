@@ -14,8 +14,12 @@ import time
 import unittest
 import zipfile
 from types import SimpleNamespace
+from unittest import mock
 
 TMP = tempfile.mkdtemp(prefix="orbit-platforms-test-")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _cleanup  # noqa: E402
+_cleanup.on_exit(TMP)                      # nothing left behind: temp folders, transcripts
 os.environ["STAFFROOM_HOME"] = TMP
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(KIT, "core"))
@@ -95,6 +99,22 @@ def win_py(code, os_kind="windows"):
                           capture_output=True, text=True)
 
 
+def module_available(name):
+    import importlib.util
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+# The listener and the live-call path both use the real numpy + soundcard packages (the fake card
+# itself imports numpy). Those are an optional install, so the host may not have them.
+HAVE_AUDIO = module_available("numpy") and module_available("soundcard")
+# POSIX-only fixtures: shell-script executables, `sh -n`, tesseract stand-ins, pwd/getuid. The same
+# checks run in the macOS/Linux/WSL2 CI jobs; a native Windows host does not execute them.
+POSIX_FIXTURE = unittest.skipUnless(os.name == "posix", "needs a POSIX shell and POSIX-only fixtures")
+
+
 class Words(unittest.TestCase):
     def test_mac_words_stay_on_a_mac(self):
         old = osinfo.KIND
@@ -132,9 +152,10 @@ class Listener(unittest.TestCase):
         self.assertTrue(wait_for(lambda: os.path.exists(os.path.join(d, "alive"))))
         time.sleep(secs)
         open(os.path.join(d, "stop"), "w").close()
-        p.wait(10)
+        p.communicate(timeout=10)                            # drain and close both captured pipes
         return d, p
 
+    @unittest.skipUnless(HAVE_AUDIO, "needs numpy and soundcard")
     def test_two_streams_at_16k_until_stop(self):
         d, p = self.run_listener()
         self.assertEqual(p.returncode, 0)
@@ -145,6 +166,7 @@ class Listener(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(d, "listener.pid")))
         self.assertFalse(os.path.exists(os.path.join(d, "alive")))
 
+    @unittest.skipUnless(HAVE_AUDIO, "needs numpy and soundcard")
     def test_silent_loopback_is_padded_so_times_line_up(self):
         d, p = self.run_listener(silent=True, secs=2.0)
         them = os.path.getsize(os.path.join(d, "them.pcm")) // 4
@@ -188,6 +210,7 @@ class LinuxCall(unittest.TestCase):
         for eid in list(calls.CALLS):
             calls.stop(eid)
 
+    @unittest.skipUnless(HAVE_AUDIO, "needs numpy and soundcard")
     def test_start_listen_stop(self):
         ended = []
         st = calls.start(self.eid, "Alex", "Supplier", on_end=lambda eid, info: ended.append(info))
@@ -206,6 +229,7 @@ class LinuxCall(unittest.TestCase):
         self.assertIn("Them: Thirty one dollars a kilo.", body)
         self.assertFalse(os.path.exists(live["audio"]))      # raw audio deleted
 
+    @unittest.skipUnless(HAVE_AUDIO, "needs numpy and soundcard")
     def test_listener_that_dies_ends_the_call(self):
         st = calls.start(self.eid, "Alex", "Short")
         live = calls.CALLS[self.eid]
@@ -241,6 +265,7 @@ class Service(unittest.TestCase):
         ocr = next(r for r in rows if "tesseract" in r[1])
         self.assertFalse(ocr[2])                              # optional
 
+    @POSIX_FIXTURE
     def test_windows_start_script(self):
         osinfo.KIND = "wsl"
         os.environ["WSL_DISTRO_NAME"] = "Ubuntu-24.04"
@@ -268,6 +293,70 @@ class Service(unittest.TestCase):
         self.assertIsNone(self.cli.service_pid())
 
 
+class NativeService(unittest.TestCase):
+    """Native Windows service/doctor contracts use captured PowerShell and fake MXC results only."""
+
+    def setUp(self):
+        self.cli = orbit_cli()
+        self.old_kind, self.old_registry = osinfo.KIND, engine.registry()
+        osinfo.KIND = "windows"
+        engine.save_registry({"team_name": "Test", "owners": {}, "employees": {},
+                              "platform": {"sandbox_mode": "mxc", "decided_by": "owner",
+                                           "decided_at": "2026-11-10", "mxc_unavailable_reason": None}})
+
+    def tearDown(self):
+        osinfo.KIND = self.old_kind
+        engine.save_registry(self.old_registry)
+
+    def test_scheduled_task_creation_is_exact_and_idempotent(self):
+        scripts, said = [], []
+        with mock.patch.object(self.cli, "service_pythonw", return_value=sys.executable), \
+                mock.patch.object(self.cli, "win_ps", side_effect=lambda script: scripts.append(script) or SimpleNamespace(returncode=0)), \
+                mock.patch.object(self.cli, "running", return_value=True), \
+                mock.patch.object(self.cli, "say", side_effect=said.append):
+            self.assertTrue(self.cli.start_windows())
+            self.assertTrue(self.cli.start_windows())
+        creates = [s for s in scripts if "Register-ScheduledTask" in s]
+        starts = [s for s in scripts if "Start-ScheduledTask" in s]
+        self.assertEqual(len(creates), 2)
+        self.assertEqual(creates[0], creates[1])
+        self.assertIn("New-ScheduledTaskTrigger -AtLogOn", creates[0])
+        self.assertIn("New-ScheduledTaskSettingsSet -Hidden", creates[0])
+        self.assertIn("-TaskName 'Orbit'", creates[0])
+        self.assertIn("-Force", creates[0])
+        self.assertEqual(starts, ["Start-ScheduledTask -TaskName 'Orbit'"] * 2)
+        with open(os.path.join(engine.HOME, ".runtime", "orbit-service.cmd"), encoding="utf-8") as fh:
+            service = fh.read()
+        self.assertIn('set "STAFFROOM_HOME=%s"' % engine.HOME, service)
+        self.assertIn('"%s" service-run' % os.path.join(engine.KIT, "orbit"), service)
+        self.assertTrue(all("Running." in line for line in said))
+
+    def test_native_doctor_names_both_mxc_fixes_without_wsl_commands(self):
+        import mxc
+        old_build = os.environ.get("ORBIT_WIN_BUILD")
+        os.environ["ORBIT_WIN_BUILD"] = "10.0.26100"
+        if old_build is None:
+            self.addCleanup(os.environ.pop, "ORBIT_WIN_BUILD", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "ORBIT_WIN_BUILD", old_build)
+        with mock.patch.object(self.cli, "service_pythonw", return_value=sys.executable), \
+                mock.patch.object(osinfo, "which", side_effect=lambda name: name if name == "tesseract" else None), \
+                mock.patch.object(mxc, "discover", return_value={"ok": True, "reason": ""}), \
+                mock.patch.object(self.cli, "sandbox_probe", return_value={"verdict": "usable"}):
+            rows = self.cli.windows_checks()
+        self.assertTrue(all(ok for ok, _, must in rows if must), rows)
+        self.assertFalse(any("setup-linux.sh" in message for _, message, _ in rows))
+
+        with mock.patch.object(self.cli, "service_pythonw", return_value=sys.executable), \
+                mock.patch.object(osinfo, "which", return_value=None), \
+                mock.patch.object(mxc, "discover", return_value={"ok": False, "reason": "runtime missing"}):
+            rows = self.cli.windows_checks()
+        runtime = next(message for ok, message, must in rows if must and "MXC sandbox runtime" in message)
+        self.assertIn("setup-windows.ps1", runtime)
+        self.assertIn("orbit sandbox wsl2", runtime)
+        self.assertNotIn("setup-linux.sh", runtime)
+
+
 class Documents(unittest.TestCase):
     def setUp(self):
         import docs
@@ -286,6 +375,7 @@ class Documents(unittest.TestCase):
         self.docs.MAC = self.mac
         os.environ["PATH"] = self.path
 
+    @POSIX_FIXTURE
     def test_ocr_uses_tesseract_with_arabic_and_english(self):
         img = os.path.join(TMP, "scan.png")
         with open(img, "wb") as fh:
@@ -319,10 +409,6 @@ class Sandbox(unittest.TestCase):
                            env=dict(os.environ, ORBIT_OS="wsl", PYTHONPATH=os.path.join(KIT, "core")),
                            capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), "True", r.stderr)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class Onboarding(unittest.TestCase):
@@ -391,6 +477,12 @@ class ClaudeSession(unittest.TestCase):
 
     def test_local_settings_mirror_the_run(self):
         import hire
+        # This test covers the settings blob itself on every host. Native-Windows Desktop refusal is a
+        # separate gate with its own focused tests (T036/T037), so it must not hide the Windows sandbox
+        # branch here.
+        real_guard = engine.require_employee_launch
+        engine.require_employee_launch = lambda emp, surface: None
+        self.addCleanup(setattr, engine, "require_employee_launch", real_guard)
         os.makedirs(os.path.join(TMP, "team"), exist_ok=True)
         engine.save_registry({"team_name": "Test", "owners": {"111": {"name": "Alex"}}, "employees": {},
                               "defaults": {"model": "sonnet"}, "panel": {"port": 7397}})
@@ -568,10 +660,47 @@ class Updates(unittest.TestCase):
         update._save({"latest": "0.0.1", "checked": time.time()})
         self.assertFalse(update.status()["newer"])
 
+    def test_a_rewritten_history_still_updates_and_keeps_the_old_copy(self):
+        import update
+        root = tempfile.mkdtemp(dir=TMP)
+        up, kit = os.path.join(root, "up"), os.path.join(root, "kit")
+
+        def g(cwd, *a):
+            return subprocess.run(["git", "-C", cwd, "-c", "user.name=T", "-c", "user.email=t@example.com"] + list(a),
+                                  capture_output=True, text=True, check=True)
+
+        def put(version, text):
+            for name, body in (("VERSION", version), ("a.txt", text)):
+                with open(os.path.join(up, name), "w") as fh:
+                    fh.write(body + "\n")
+        os.makedirs(up)
+        g(up, "init", "-q", "-b", "main")
+        put("1.0.0", "Old sample name")
+        g(up, "add", "-A"); g(up, "commit", "-qm", "one"); g(up, "tag", "v1.0.0")
+        subprocess.run(["git", "clone", "-q", up, kit], check=True)
+        g(up, "checkout", "-q", "--orphan", "rewritten")                  # the official history is rewritten…
+        put("1.0.1", "New sample name")
+        g(up, "add", "-A"); g(up, "commit", "-qm", "one, rewritten"); g(up, "tag", "v1.0.1")
+        real = (engine.KIT, update.official_copy, update.restart)
+        engine.KIT, update.official_copy, update.restart = kit, (lambda: True), (lambda: None)
+        try:
+            update._save({"latest": "1.0.1", "checked": time.time()})
+            msg = update.apply()                                           # …and this copy still moves to it
+            self.assertIn("before-v1.0.1", msg)
+            with open(os.path.join(kit, "a.txt")) as fh:
+                self.assertEqual(fh.read().strip(), "New sample name")
+            self.assertEqual(update.current(), "1.0.1")
+            old = subprocess.run(["git", "-C", kit, "show", "before-v1.0.1:a.txt"], capture_output=True, text=True)
+            self.assertEqual(old.stdout.strip(), "Old sample name")         # the old copy is kept on a branch
+        finally:
+            engine.KIT, update.official_copy, update.restart = real
+            update._save({})
+
 
 class ContentKit(unittest.TestCase):
     """The content creator comes trained: the skill loads with the ability, and the kit is whole."""
 
+    @POSIX_FIXTURE
     def test_skill_and_kit(self):
         import abilities
         kit = os.path.join(engine.KIT, "core", "skills", "content-creator")
@@ -692,7 +821,7 @@ class Proactive(unittest.TestCase):
         import team
         shown = []
         real = osinfo.notify
-        osinfo.notify = lambda title, text: shown.append((title, text)) or True
+        osinfo.notify = lambda title, text, **kw: shown.append((title, text)) or True
         try:
             team.to_room("suoo", "Suoo", "Alex", "job")("Plan for approval: 2 Shorts a day.")
             team.to_room("suoo", "Suoo", "Alex", "panel")("A chat reply.")
@@ -1051,7 +1180,8 @@ class Asleep(unittest.TestCase):
         import datetime as dt
         now = dt.datetime.now()
         reg = engine.registry()
-        reg["jobs"] = {"standup": {"at": (now - dt.timedelta(minutes=1)).strftime("%H:%M"), "days": "daily"}}
+        reg["jobs"] = {"standup": {"at": (now - dt.timedelta(minutes=1)).strftime("%H:%M"), "days": "daily"},
+                       "eod": {"at": "17:00", "days": ""}}          # not due today: exactly one routine is due
         engine.save_registry(reg)
         self.awake._since = time.time() - 5                               # awake for 5 seconds
         self.assertFalse(self.awake.settled())
@@ -1124,7 +1254,7 @@ class Asleep(unittest.TestCase):
         a, k = self.started[0]
         self.assertEqual(a[2], "followup")
         shown, real = [], osinfo.notify
-        osinfo.notify = lambda t, b: shown.append(b) or True
+        osinfo.notify = lambda t, b, **kw: shown.append(b) or True
         try:
             k["on_done"]("Standup: 3 Shorts ready.")                      # no phone channel: it still reaches the owner
         finally:
@@ -1285,7 +1415,8 @@ class CloudShift(unittest.TestCase):
             with open(p, "w") as fh:
                 fh.write(body)
         desk = self.cloud.build_desk(self.eid)
-        have = {os.path.relpath(os.path.join(b, n), desk) for b, _, ns in os.walk(desk) for n in ns if ".git" + os.sep not in b + os.sep}
+        have = {os.path.relpath(os.path.join(b, n), desk).replace(os.sep, "/")
+                for b, _, ns in os.walk(desk) for n in ns if ".git" + os.sep not in b + os.sep}
         self.assertTrue({"research/a.md", "kit/Poppins.ttf", "ROLE.md", "CLAUDE.md", "handbook.md", "handoff.py", "PLAN.md"} <= have)
         self.assertFalse({"content/x.mp4", "api_token.txt", ".env", "state/cloud.json", ".mcp.json"} & have)
         with open(os.path.join(desk, "CLAUDE.md")) as fh:
@@ -1678,6 +1809,7 @@ class ExtraComputing(unittest.TestCase):
         os.environ["PATH"] = self.bin + os.pathsep + self.path
         return log
 
+    @POSIX_FIXTURE
     def test_connect_needs_a_private_repo_you_can_write_to(self):
         self.fake_gh("PUBLIC")
         with self.assertRaisesRegex(self.c.ComputeError, "isn't private"):
@@ -1765,13 +1897,14 @@ class NativeWindows(unittest.TestCase):
     def test_windows_runs_carry_the_containment_hook_not_fail_unavailable(self):
         r = json.loads(self.win_py(
             "import engine, json; b = engine.sandbox_blob({'id': 't', 'workspace': '.', 'name': 't'}, []); "
-            "h = (b.get('hooks') or {}).get('PreToolUse', [{}])[0]; "
+            "h = (b.get('hooks') or {}).get('PreToolUse', [{}])[0]; hk = h.get('hooks', [{}])[0]; "
             "print(json.dumps({'fail': b['sandbox'].get('failIfUnavailable'), "
-            "'matcher': h.get('matcher'), 'hook_cmd': h.get('hooks', [{}])[0].get('command', '')}))"))
+            "'matcher': h.get('matcher'), 'command': hk.get('command', ''), 'args': hk.get('args', [])}))"))
         self.assertEqual(r["fail"], None)                   # the agent starts normally; MXC holds the line
         self.assertEqual(r["matcher"], "Bash|PowerShell")
-        self.assertIn("mxc.py", r["hook_cmd"])              # Orbit's helper, not an inline blob
-        self.assertIn("--hook", r["hook_cmd"])
+        self.assertEqual(r["command"], sys.executable)      # exec form: no shell quoting of a path with spaces
+        self.assertTrue(any(a.replace("\\", "/").endswith("core/mxc.py") for a in r["args"]))
+        self.assertIn("--hook", r["args"])                  # Orbit's helper, not an inline blob
 
     def test_wsl_runs_keep_the_fail_unavailable_sandbox(self):   # T034 regression parity
         for kind in ("wsl", "mac", "linux"):
@@ -1779,6 +1912,245 @@ class NativeWindows(unittest.TestCase):
                 "import engine, json; b = engine.sandbox_blob({'id': 't', 'workspace': '.', 'name': 't'}, []); "
                 "print(json.dumps([b['sandbox'].get('failIfUnavailable'), 'hooks' in b]))", kind))
             self.assertEqual(r, [True, False], kind)
+
+
+class EmployeeEntryMode(unittest.TestCase):
+    """T036/T037: every native-Windows employee entry point uses the same MXC/WSL2 decision.
+    MXC permits contained headless/terminal work, WSL2 mode refuses all native-side work, and
+    employee Desktop sessions remain unavailable until feature 003 is implemented."""
+
+    def setUp(self):
+        self.old_kind, self.old_registry = osinfo.KIND, engine.registry()
+        osinfo.KIND = "windows"
+        self.ws = os.path.join(TMP, "employees", "tess-entry-mode")
+        os.makedirs(os.path.join(self.ws, "state"), exist_ok=True)
+        engine.save_registry({
+            "team_name": "Test", "owners": {"local-alex": {"name": "Alex", "local": True}},
+            "employees": {"tess": {"name": "Tess", "role": "Research", "workspace": self.ws,
+                                    "status": "active", "abilities": []}},
+            "defaults": {"model": "sonnet"}, "panel": {"port": 7391},
+            "platform": {"sandbox_mode": "mxc", "decided_by": "owner", "decided_at": "2026-11-10",
+                         "mxc_unavailable_reason": None},
+        })
+        self.emp = engine.employee("tess")
+
+    def tearDown(self):
+        osinfo.KIND = self.old_kind
+        engine.save_registry(self.old_registry)
+
+    def patch(self, obj, name, value):
+        old = getattr(obj, name)
+        setattr(obj, name, value)
+        self.addCleanup(setattr, obj, name, old)
+
+    def mode(self, value):
+        reg = engine.registry()
+        reg["platform"] = {"sandbox_mode": value, "decided_by": "owner", "decided_at": "2026-11-10",
+                           "mxc_unavailable_reason": None}
+        engine.save_registry(reg)
+
+    @staticmethod
+    def setting(cmd):
+        return json.loads(cmd[cmd.index("--settings") + 1])
+
+    def test_mxc_headless_and_terminal_work_share_the_containment_controls(self):
+        calls = []
+        self.patch(engine, "skills_plugin", lambda emp, wanted: os.path.join(TMP, "entry-mode-skills"))
+        self.patch(engine, "resolve_claude", lambda: "claude")
+        self.patch(engine, "wait_for_window", lambda *a, **k: True)
+        self.patch(engine, "stream", lambda cmd, prompt, ws, env, timeout, on_step=None:
+                   (calls.append((cmd, prompt, ws, env)) or ({"result": "done", "num_turns": 1}, [])))
+
+        result = engine.run(self.emp, "Do the work", "followup")
+        window = engine.chat_window(self.emp)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 1)
+        headless, interactive = calls[0][0], window["cmd"]
+        self.assertIn("-p", headless)
+        self.assertNotIn("-p", interactive)
+        self.assertEqual(headless[headless.index("--setting-sources") + 1], "user,project")
+        self.assertEqual(interactive[interactive.index("--setting-sources") + 1], "user,project")
+        h_settings, i_settings = self.setting(headless), self.setting(interactive)
+        self.assertEqual(h_settings, i_settings)                         # sandbox, MXC hook and guard inputs
+        hook = h_settings["hooks"]["PreToolUse"][0]["hooks"][0]
+        self.assertEqual(hook["command"], sys.executable)
+        self.assertTrue(any(a.replace("\\", "/").endswith("core/mxc.py") for a in hook["args"]))
+        self.assertIn("--hook", hook["args"])
+        self.assertEqual(headless.count(engine.GUARD), 1)
+        self.assertEqual(interactive.count(engine.GUARD), 1)
+
+    def test_wsl2_mode_refuses_run_and_terminal_chat_before_launch(self):
+        self.mode("wsl2")
+        self.patch(engine, "stream", lambda *a, **k: self.fail("a blocked run reached Claude"))
+        result = engine.run(self.emp, "Do the work")
+        self.assertFalse(result["ok"])
+        self.assertIn("inside WSL", result["text"])
+        with self.assertRaises(SystemExit) as stopped:
+            orbit_cli().chat("tess", show=True)
+        self.assertIn("inside WSL", str(stopped.exception))
+
+    def test_wsl2_mode_refuses_open_panel_and_employee_app(self):
+        import claudeapp
+        import orders
+        import panel
+        self.mode("wsl2")
+        opened = []
+        self.patch(osinfo, "open_terminal", lambda *a, **k: opened.append((a, k)) or True)
+        with self.assertRaisesRegex(RuntimeError, "inside WSL"):
+            claudeapp.open_chat("tess")
+        with self.assertRaisesRegex(orders.OrderError, "inside WSL"):
+            panel.claude_session("tess")
+        old_argv = sys.argv
+        sys.argv = ["orbit", "open", "tess"]
+        self.addCleanup(setattr, sys, "argv", old_argv)
+        with self.assertRaises(SystemExit) as stopped:
+            orbit_cli().main()
+        self.assertIn("inside WSL", str(stopped.exception))
+        self.assertEqual(opened, [])
+
+    def test_refresh_checks_the_mode_before_touching_employee_session_files(self):
+        import claudeapp
+        import desk
+        import hire
+        import staffd
+        for mode in ("mxc", "wsl2"):
+            with self.subTest(mode=mode):
+                self.mode(mode)
+                touched = []
+                with mock.patch.object(desk, "ensure", return_value=desk.DIR), \
+                        mock.patch.object(hire, "upgrade_workspace", side_effect=lambda emp: touched.append("upgrade")), \
+                        mock.patch.object(engine, "claude_session", side_effect=lambda emp: touched.append("session")), \
+                        mock.patch.object(claudeapp, "write_plan", side_effect=lambda emp: touched.append("plan")), \
+                        mock.patch.object(staffd, "log"):
+                    staffd.refresh_sessions()
+                self.assertEqual(touched, [], "blocked Desktop refresh modified %s employee state" % mode)
+
+    def test_mxc_panel_uses_contained_terminal_argv_but_desktop_surfaces_refuse(self):
+        import claudeapp
+        import panel
+        launched = []
+        self.patch(osinfo, "open_terminal", lambda argv, name="": launched.append((list(argv), name)) or True)
+        result = panel.claude_session("tess")
+        argv = [os.path.join(engine.KIT, "orbit"), "chat", "tess"]
+        self.assertEqual(launched, [(argv, "chat-tess")])
+        self.assertEqual(result["how"], "terminal")
+        self.assertEqual(result["command"], subprocess.list2cmdline([sys.executable] + argv))
+        with self.assertRaisesRegex(RuntimeError, "Desktop sessions"):
+            engine.claude_session("tess")
+        with self.assertRaisesRegex(RuntimeError, "Desktop sessions"):
+            claudeapp.open_chat("tess")
+        old_argv = sys.argv
+        sys.argv = ["orbit", "open", "tess"]
+        self.addCleanup(setattr, sys, "argv", old_argv)
+        with self.assertRaises(SystemExit) as stopped:
+            orbit_cli().main()
+        self.assertIn("Desktop sessions", str(stopped.exception))
+
+
+class PlatformMessagesAndDesk(unittest.TestCase):
+    """T037: notification text, terminal argv, and the native-Windows owner desk remain platform-owned."""
+
+    def setUp(self):
+        self.old_kind, self.old_registry = osinfo.KIND, engine.registry()
+        os.makedirs(os.path.join(TMP, "team"), exist_ok=True)
+        engine.save_registry({"team_name": "Test", "owners": {"local-alex": {"name": "Alex", "local": True}},
+                              "employees": {}, "panel": {"port": 7391}})
+
+    def tearDown(self):
+        osinfo.KIND = self.old_kind
+        engine.save_registry(self.old_registry)
+
+    def patch(self, obj, name, value):
+        old = getattr(obj, name)
+        setattr(obj, name, value)
+        self.addCleanup(setattr, obj, name, old)
+
+    @staticmethod
+    def notification_body(text, more):
+        body = " ".join((text or "").split())
+        if len(body) > 200:
+            body = body[:197].rsplit(" ", 1)[0] + "…"
+        if more:
+            body = (body + " (%s)" % more)[:240]
+        return body
+
+    def test_every_notification_platform_receives_the_same_computed_body(self):
+        raw = "  Line one\nline   two's " + ("long-word " * 30)
+        expected = self.notification_body(raw, "Mission Control")
+        calls = []
+        self.patch(osinfo.subprocess, "run", lambda args, **kw: calls.append(list(args)) or SimpleNamespace(returncode=0))
+        self.patch(osinfo, "which", lambda name: name if name == "notify-send" else None)
+        os.makedirs(osinfo.RUNTIME, exist_ok=True)
+
+        osinfo.KIND = "mac"
+        self.patch(osinfo, "notifier", lambda: "Orbit.app")
+        self.assertTrue(osinfo.notify("Crew", raw, "Mission Control"))
+        with open(os.path.join(osinfo.RUNTIME, "notify.txt"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "Crew\n%s\n" % expected)
+
+        osinfo.KIND = "linux"
+        self.assertTrue(osinfo.notify("Crew", raw, "Mission Control"))
+        self.assertEqual(calls[-1], ["notify-send", "Crew", expected])
+
+        osinfo.KIND = "windows"
+        self.assertTrue(osinfo.notify("Crew", raw, "Mission Control"))
+        ps = calls[-1][-1]
+        self.assertIn("$n.ShowBalloonTip(5000, 'Crew', '%s', 2)" % expected.replace("'", "''"), ps)
+        self.assertNotIn("\n", expected)
+        self.assertIn("…", expected)
+
+    def test_native_terminal_launch_and_fallback_display_keep_an_argv_boundary(self):
+        osinfo.KIND = "windows"
+        calls = []
+        self.patch(osinfo.subprocess, "Popen", lambda argv, **kw: calls.append((list(argv), kw)) or SimpleNamespace())
+        argv = [os.path.join(engine.KIT, "orbit"), "chat", "name with spaces"]
+        expected = [sys.executable] + argv
+        self.assertTrue(osinfo.open_terminal(argv, "crew chat"))
+        self.assertEqual(calls[0][0], expected)
+        self.assertEqual(calls[0][1]["creationflags"], getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010))
+        self.assertNotIn(os.path.basename(calls[0][0][0]).lower(), ("cmd.exe", "powershell.exe"))
+        self.assertEqual(osinfo.display_argv(argv), subprocess.list2cmdline(expected))
+        osinfo.KIND = "linux"
+        self.assertEqual(osinfo.display_argv(["orbit", "chat", "name with spaces"]),
+                         "orbit chat 'name with spaces'")
+
+    def test_windows_front_desk_allows_only_the_exact_orbit_command_and_normalized_paths(self):
+        import desk
+        osinfo.KIND = "windows"
+        desk.ensure()
+        with open(os.path.join(desk.DIR, ".claude", "settings.local.json"), encoding="utf-8") as fh:
+            perms = json.load(fh)["permissions"]
+        orbit = os.path.normpath(os.path.join(engine.KIT, "orbit"))
+        command = subprocess.list2cmdline([os.path.normpath(sys.executable), orbit])
+        command_rules = [r for r in perms["allow"] if r.startswith(("PowerShell(", "Bash("))]
+        self.assertEqual(command_rules, ["PowerShell(%s *)" % command, "PowerShell(%s)" % command])
+        self.assertNotIn("PowerShell(orbit *)", perms["allow"])
+        self.assertFalse(any(r.startswith("Bash(") for r in perms["allow"]))
+
+        def absolute(path):
+            return "//" + os.path.realpath(path).replace("\\", "/")
+        self.assertIn("Read(%s/**)" % absolute(engine.HOME), perms["allow"])
+        self.assertIn("Write(%s/**)" % absolute(desk.DIR), perms["allow"])
+        self.assertIn("Read(%s/**)" % absolute(engine.SECRETS), perms["deny"])
+        self.assertIn("Edit(%s)" % absolute(engine.REGISTRY), perms["deny"])
+        self.assertIn("Write(%s/**)" % absolute(os.path.join(engine.HOME, "employees")), perms["deny"])
+
+    def test_platform_docs_keep_connection_and_native_desktop_boundaries_honest(self):
+        docs = {}
+        for name in ("README.md", "SETUP.md", "PRODUCT.md"):
+            with open(os.path.join(KIT, name), encoding="utf-8") as fh:
+                docs[name] = fh.read()
+        with open(os.path.join(KIT, "VERSION"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read().strip(), "0.12.0")
+        for name, text in docs.items():
+            self.assertIn("configured connection", text.lower(), name)
+        flat = {name: " ".join(text.split()) for name, text in docs.items()}
+        self.assertIn("Native-Windows employee Desktop chats stay disabled", flat["README.md"])
+        self.assertIn("Native-Windows employee Desktop chats remain disabled", flat["SETUP.md"])
+        self.assertIn("Product-release readiness remains blocked", flat["PRODUCT.md"])
+        self.assertNotIn("real-host MXC validation is optional", docs["PRODUCT.md"])
+        self.assertIn("orbit open <h>                   their own Claude-app chat (Mac/Linux/WSL; native Windows stays gated)",
+                      docs["README.md"])
 
 
 class Mode(unittest.TestCase):
@@ -1915,7 +2287,7 @@ class SignedOutSetup(unittest.TestCase):
 
     def setUp(self):
         self.reals = engine.resolve_claude
-        self.dir = tempfile.mkdtemp(prefix="fake-claude-")
+        self.dir = _cleanup.temp("fake-claude-")
         engine.resolve_claude = lambda: fake_claude.install(
             self.dir, auth={"loggedIn": False},
             prompt={"result": "Morning notes ready.",

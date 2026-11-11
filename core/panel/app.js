@@ -215,6 +215,7 @@ async function render(nav) {
   if (inMain && !nav && (active.value || active.tagName === 'SELECT' || active.type === 'checkbox')) { patchLive(); return; }
   const focusId = inMain ? active.id : '';
   const chat = r.page === 'employee' && r.tab === 'chat';
+  if (chat || r.page === 'today') markSeen(chat ? r.id : null);
   const cm = chat && $('.chat-main', main);
   const following = !!cm && cm.getBoundingClientRect().bottom <= window.innerHeight + 60;   // you're at the latest message
   const pretend = S.data && S.data.demo && r.page !== 'today'   // Mission Control has the long note
@@ -269,11 +270,12 @@ function renderSide(r) {
   side.innerHTML = `
     <div class="brand"><img src="/icon.svg" alt=""><div><b>${esc(d.team_name)}${d.demo ? ' <span class="badge accent">demo</span>' : ''}</b><span class="meta"><i class="dot ${d.online ? 'active' : 'off'}"></i>${d.online ? 'Running' : 'Service stopped'}</span></div></div>
     <nav class="nav">
-      <a href="/" class="${on('today')}">${icon('home')}Mission Control</a>
+      <a href="/" class="${on('today')}">${icon('home')}Mission Control${d.unread ? ` <span class="badge accent" title="${d.unread} new from your crew">${d.unread}</span>` : ''}</a>
       <a href="/team" class="${on('team') || on('abilities')}">${icon('users')}Crew</a>
       <a href="/settings" class="${on('settings') || on('connect')}">${icon('sliders')}Settings</a>
     </nav>
     <a class="btn btn-primary hire" href="/hire">${icon('plus')}Add crew</a>
+    ${d.demo ? '' : `<button type="button" class="btn hire" data-act="open-desk" title="One Claude chat for your whole crew: hire, check and change anyone by talking">${icon('claude')}Orbit in Claude</button>`}
     <h3>Crew</h3>
     <nav class="nav emps">${emps || '<span class="faint small pad">None yet</span>'}</nav>
     <div class="spacer"></div>
@@ -378,7 +380,7 @@ PAGES.welcome = () => {
   const brand = `<div class="w-brand"><img src="/icon.svg" alt=""><span>Orbit</span></div>`;
   if (step === 1) {
     return `<div class="welcome">${brand}<h1>Build your crew.</h1>
-      <p class="lede">Your AI workforce. In motion. Build your team, assign missions, get things done, on the Claude plan you already have.</p>${steps}
+      <p class="lede">Your AI workforce. In motion. Build your team, assign missions, get things done, through Claude's connection you already configured.</p>${steps}
       <form class="form w-card" data-form="welcome">
         <div class="field"><label for="w-name">Your first name</label><input id="w-name" class="input lg" name="name" required maxlength="40" autocomplete="given-name" placeholder="Alex" value="${esc(v('welcome', 'name', ''))}"></div>
         <div class="field"><label for="w-team">Your business or your work</label><input id="w-team" class="input lg" name="team_name" maxlength="60" placeholder="Northwind Coffee" value="${esc(v('welcome', 'team_name', ''))}"></div>
@@ -497,8 +499,8 @@ function cardHtml(sel, ob, name, from) {
       ${(S.data.cloud_shift || {}).eligible ? `<p class="meta card-cloud">${icon('claude')} If this ${MAC()} is closed or offline, they keep working in Anthropic's cloud, on your Claude plan. Turn it off any time in their Manage tab.</p>` : ''}
       <section><h3>Tools</h3>${access}</section>
       <section><h3>Routines</h3><div class="chips">${routines}</div><p class="meta">Reports land in the team room and on your phone.</p></section>
-      <section class="wide"><h3>Weekly budget on your Claude plan</h3><div class="seg budget" role="group" aria-label="Weekly budget">${budget}</div>
-        <p class="meta">When it's used up, routines wait and ${esc(name)} still answers you. Crew members also slow down when your plan's weekly limit runs high.</p></section>
+      <section class="wide"><h3>Weekly token budget</h3><div class="seg budget" role="group" aria-label="Weekly budget">${budget}</div>
+        <p class="meta">When the budget is used up, routines wait and ${esc(name)} still answers you. Crew members also slow down when Claude reports usage is high.</p></section>
     </div>
     <div class="save-bar"><button class="btn btn-primary btn-lg" type="submit" data-hire-label>${icon('plus')}Launch ${esc(name || 'them')}</button>
       <button type="button" class="btn btn-ghost" data-act="ob-back">Change answers</button></div>
@@ -515,14 +517,38 @@ function keepCard() {
 }
 async function openClaude(emp, btn) {
   const label = btn ? btn.innerHTML : '';
+  const e = (S.data.employees || []).find((x) => x.id === emp) || { name: emp };
   if (btn) { btn.disabled = true; btn.textContent = 'Opening Claude…'; }
   try {
     const r = await api('/api/claude_session', { employee: emp });
-    S.claudeLinks = { ...(S.claudeLinks || {}), [emp]: r.link };
-    if (!r.opened) window.location.href = r.link;
-    toast(r.opened ? 'Claude is opening. Confirm the folder once, then press Enter to say hello.' : 'If Claude didn\'t open, use the link on this page.');
-  } catch (e) { toast(e.message, 'err'); }
+    S.claudeCmd = { ...(S.claudeCmd || {}), [emp]: r.command };
+    const busy = r.busy ? ` ${esc(e.name)} is in the middle of ${esc(r.busy)}; the window opens when it's done.` : '';
+    if (r.opened && r.how === 'app' && r.new_chat) toast(`Claude is opening a new chat with ${esc(e.name)}. Press Enter once: they set up their routines there, so every report lands in that chat.`);
+    else if (r.opened && r.how === 'app') toast(`Opening your chat with ${esc(e.name)} in Claude.`);
+    else if (r.opened) toast(`A terminal is opening on ${esc(e.name)}'s conversation.${busy}`);
+    else {
+      try { await navigator.clipboard.writeText(r.command); } catch (_) { /* no clipboard */ }
+      toast(`Run this in a terminal (copied): ${r.command}`);
+    }
+  } catch (e2) { toast(e2.message, 'err'); }
   if (btn) { btn.disabled = false; btn.innerHTML = label; }
+}
+const seenAt = {};                    // per view: a filtered employee chat marks only that employee
+function markSeen(empId) {
+  if (S.data && S.data.demo) return;
+  const key = empId || 'global';
+  const now = Date.now();
+  if (now - (seenAt[key] || 0) < 30000 || !(S.data && S.data.unread)) return;
+  seenAt[key] = now;
+  api('/api/seen', empId ? { employee: empId } : {}).then(async () => {
+    if (S.data) {
+      if (!empId) S.data.unread = 0;
+      else {
+        try { const d = await api('/api/state'); S.data.unread = d.unread; } catch (_) { /* keep the old badge */ }
+      }
+    }
+    renderSide(route());
+  }).catch(() => {});
 }
 // The moment after a hire: what's ready, and Claude opening on the new crew member
 function syncLaunch(r) {             // the welcome after a hire: shown once, then Claude opens on the new crew member
@@ -545,10 +571,10 @@ function launchHtml(e) {
     <p class="launch-kicker">Welcome aboard</p><h2>${esc(e.name)} joined your crew</h2><p class="launch-role">${esc(e.role)}</p>
     <ol class="launch-steps">${steps.map(([t, d], i) => `<li>${icon('check')}<div><b>${t}</b><span>${d}</span></div></li>`).join('')}</ol>
     <div class="launch-actions">
-      <button class="btn btn-primary btn-lg" data-act="open-claude" data-emp="${e.id}">${icon('claude')}Talk to ${esc(e.name)} in Claude</button>
+      <button class="btn btn-primary btn-lg" data-act="open-claude" data-emp="${e.id}" title="${esc(e.name)}'s own conversation in a Claude window">${icon('claude')}Talk to ${esc(e.name)} in Claude</button>
       ${st.paired ? '' : `<a class="btn btn-lg" href="/connect">${icon('phone')}Put ${esc(e.name)} on your phone</a>`}
     </div>
-    <p class="meta">Claude is where ${esc(e.name)} does the work, with all of Claude's power. Orbit adds the job, the memory, the routines and the locks.</p>
+    <p class="meta">Claude is where ${esc(e.name)} does the work, with all of Claude's power. Orbit adds the job, the memory, the routines and the locks. Their reports reach you here, on your phone once connected, and as notifications on this computer.</p>
     <button class="btn btn-ghost btn-sm launch-close" data-act="close-launch">Watch their first task</button>
   </div></div>`;
 }
@@ -655,7 +681,7 @@ PAGES.today = () => {
   const u = d.usage || {};
   const usage = `<div class="usage-box"><div class="row2"><span>Crew today</span><b class="num">${fmtTok(useToday)} tokens</b></div><div class="row2"><span>Last 7 days</span><b class="num">${fmtTok(use7)} tokens</b></div>
     ${['five_hour', 'seven_day'].filter((k) => k in u).map((k) => `<div class="row2"><span>${k === 'five_hour' ? '5-hour limit' : 'Weekly limit'}</span><b class="num">${Math.round(u[k])}% used</b></div>`).join('')}
-    <p class="meta">Your crew runs on your Claude plan: nothing extra is billed. The limits are your plan's (shared with your own Claude use); each crew member also has a weekly budget.</p></div>`;
+    <p class="meta">Your crew runs through Claude's configured connection: nothing extra is billed by Orbit. Limits are the ones Claude reports and are shared with your own Claude use; each crew member also has a weekly token budget.</p></div>`;
   const calls = Object.keys(d.calls || {}).map((id) => callCard(id, true)).join('');
   const up = d.update || {};
   const upd = up.newer && !up.dismissed ? `<section class="update"><div><b>Orbit ${esc(up.latest)} is available</b> <span class="meta">you have ${esc(up.current)}</span>
@@ -777,7 +803,7 @@ PAGES.employee = (r) => {
   const canCall = dt && dt.abilities.includes('meetings') && e.status !== 'paused';
   const callBtn = callOf(e.id) ? '' : canCall && !Object.keys(S.data.calls || {}).length
     ? `<button class="btn" data-act="order" data-kind="call_start" data-emp="${e.id}" title="${esc(e.name)} listens on this ${MAC()} and takes notes. Tell the others you're taking notes.">${icon('mic')}Listen to a call</button>` : '';
-  const claudeBtn = S.data.demo ? '' : `<button class="btn btn-primary" data-act="open-claude" data-emp="${e.id}" title="A Claude session in ${esc(e.name)}'s folder: same job, memory and locks">${icon('claude')}Open in Claude</button>`;
+  const claudeBtn = S.data.demo ? '' : `<button class="btn btn-primary" data-act="open-claude" data-emp="${e.id}" title="${esc(e.name)}'s own running conversation in a Claude window: everything they did and said, and what you say there they remember">${icon('claude')}Open in Claude</button>`;
   return `<header class="emp-head">${avatar(e.id, e.name, 'lg')}<div class="id"><h1>${esc(e.name)}</h1><div class="sub"><span>${esc(e.role)}</span><span>·</span><span>reports to ${esc(e.supervisor)}</span><span>·</span>${statusHtml(e)}</div></div><div class="actions">${claudeBtn}${callBtn}</div></header>${callCard(e.id)}
     <nav class="tabs">${tabs.map(([k, l, n]) => `<a href="/e/${e.id}/${k}" class="${r.tab === k ? 'on' : ''}">${l}${n !== '' ? `<small>${esc(n)}</small>` : ''}</a>`).join('')}</nav>${body}`;
 };
@@ -927,7 +953,7 @@ function reachCard(e) {
     <ol>
       <li><b>Here.</b> Type in the box above; the answer appears right under it. The whole crew talks in Mission Control's team room.</li>
       <li><b>On your phone</b> <span class="meta">recommended</span>. Telegram, Slack or Discord, through a bot of your own: message ${esc(e.name)} from anywhere, send voice notes, photos and files, and get their routine reports there. <a class="btn btn-primary btn-sm" href="/connect">Connect your phone</a> <span class="meta">about 2 minutes</span></li>
-      <li><b>In Claude.</b> <button type="button" class="btn btn-sm" data-act="open-claude" data-emp="${e.id}">${icon('claude')}Open ${esc(e.name)} in Claude</button> A session in their folder with all of Claude's power and the same memory and locks.</li>
+      <li><b>In Claude.</b> <button type="button" class="btn btn-sm" data-act="open-claude" data-emp="${e.id}">${icon('claude')}Open ${esc(e.name)} in Claude</button> Their own running conversation in a Claude window: what they did, what they said, your replies, all in one place. Routines wait while you're in it.</li>
     </ol>
     <p class="meta">What to expect: an answer in a minute or two (deep research takes longer), each with “How I did it”. On their own they only send the routines you tick in Manage (like a morning brief) and things that need you. They never post, buy or message anyone but you.</p></section>`;
 }
@@ -994,7 +1020,9 @@ function tabManage(e, dt) {
   if (!S.cat || !dt) return loading;
   const paused = e.status === 'paused';
   const jobs = Object.entries(JOB_LABELS).map(([k, l]) => `<option value="${k}">${l}</option>`).join('');
-  const models = MODELS.map((m) => `<option value="${m}" ${m === e.model ? 'selected' : ''}>${m}${m === 'sonnet' ? ' (balanced)' : m === 'haiku' ? ' (lightest on your plan)' : ' (strongest, heaviest)'}</option>`).join('');
+  const modelOpts = (cur) => MODELS.map((m) => `<option value="${m}" ${m === cur ? 'selected' : ''}>${m}${m === 'sonnet' ? ' (balanced)' : m === 'haiku' ? ' (lightest on your plan)' : ' (strongest, heaviest)'}</option>`).join('');
+  const models = modelOpts(e.model);
+  const brains = modelOpts(e.brain || 'opus');
   const on = new Set(dt.abilities);
   const groups = S.cat.groups.map((g) => {
     const items = S.cat.abilities.filter((a) => a.group === g);
@@ -1009,11 +1037,13 @@ function tabManage(e, dt) {
       <div class="save-bar"><button class="btn" data-act="order" data-kind="${paused ? 'resume' : 'pause'}" data-emp="${e.id}">${icon(paused ? 'play' : 'pause')}${paused ? 'Resume' : 'Pause'}</button></div></section>
     <section><h2>Run a routine now</h2><p class="desc">The result shows up in the chat and the team room.</p>
       <div class="save-bar"><select class="select auto" id="run-job" aria-label="Routine">${jobs}</select><button class="btn" data-act="order" data-kind="run_job" data-emp="${e.id}" data-from="#run-job" ${paused ? 'disabled' : ''}>Launch now</button></div></section>
-    <section><h2>Model</h2><p class="desc">${esc(e.name)} switches to the lightest model on their own when your plan is nearly used up.</p><div><select class="select auto" data-field="model" data-emp="${e.id}" aria-label="Model">${models}</select></div></section>
+    <section><h2>Brain and hands</h2><p class="desc">The brain thinks and talks with you: standup, initiative, end of day, the weekly review, chats. The hands do the production work: follow-ups, the morning brief, scout, self-test. Both switch to the lightest model on their own when Claude reports usage is nearly used up.</p>
+      <div class="save-bar"><label class="small muted" for="brain-${e.id}">Brain</label><select class="select auto" id="brain-${e.id}" data-field="brain" data-emp="${e.id}" aria-label="Brain model">${brains}</select>
+      <label class="small muted" for="hands-${e.id}">Hands</label><select class="select auto" id="hands-${e.id}" data-field="model" data-emp="${e.id}" aria-label="Hands model">${models}</select></div></section>
     ${cloudSection(e)}
     ${autonomySection(e)}
     ${browserSection(e)}
-    <section><h2>Weekly budget</h2><p class="desc">Tokens a week on your Claude plan. When it's used up, routines wait and ${esc(e.name)} still answers you. This week: ${fmtTok(e.tokens_7d)} tokens.</p><div><select class="select auto" data-field="weekly_tokens" data-emp="${e.id}" aria-label="Weekly budget">${[[0, 'No cap'], [1000000, 'Light · 1M tokens'], [3000000, 'Regular · 3M tokens'], [8000000, 'Heavy · 8M tokens'], [20000000, 'Very heavy · 20M tokens']].map(([n, l]) => `<option value="${n}" ${Number(e.weekly_tokens || 0) === n ? 'selected' : ''}>${l}</option>`).join('')}</select></div></section>
+    <section><h2>Weekly budget</h2><p class="desc">Tokens a week through Claude's configured connection. When the budget is used up, routines wait and ${esc(e.name)} still answers you. This week: ${fmtTok(e.tokens_7d)} tokens.</p><div><select class="select auto" data-field="weekly_tokens" data-emp="${e.id}" aria-label="Weekly budget">${[[0, 'No cap'], [1000000, 'Light · 1M tokens'], [3000000, 'Regular · 3M tokens'], [8000000, 'Heavy · 8M tokens'], [20000000, 'Very heavy · 20M tokens']].map(([n, l]) => `<option value="${n}" ${Number(e.weekly_tokens || 0) === n ? 'selected' : ''}>${l}</option>`).join('')}</select></div></section>
     <section><h2>Abilities</h2><p class="desc">What ${esc(e.name)} may do. These are locks: anything off is blocked, whatever anyone says in chat. Changes apply on their next run.</p>
       <form id="ab-${e.id}" data-form="abilities" data-emp="${e.id}"><div class="ab-bar"><button class="btn btn-primary" type="submit">Save</button><button class="btn" type="button" data-act="preset" data-emp="${e.id}" data-preset="default">Default</button><button class="btn" type="button" data-act="preset" data-emp="${e.id}" data-preset="super">Super agent</button><span class="meta">${on.size} of ${S.cat.abilities.length} on</span></div></form>
       <div class="ab-groups">${groups}</div></section>
@@ -1128,7 +1158,7 @@ PAGES.settings = () => {
     ${pending ? `<h3>Messaged your bot</h3>${pending}` : `<p class="meta">Nobody is waiting for approval.</p>`}</section>
   <section><h2>Appearance</h2><div class="seg" role="group" aria-label="Appearance"><button data-act="theme" data-v="" class="${S.theme === '' ? 'on' : ''}">${MAC() === 'PC' ? 'Match Windows' : MAC() === 'Mac' ? 'Match the Mac' : 'Match the system'}</button><button data-act="theme" data-v="light" class="${S.theme === 'light' ? 'on' : ''}">Light</button><button data-act="theme" data-v="dark" class="${S.theme === 'dark' ? 'on' : ''}">Dark</button></div></section>
   <section><h2>About this install</h2>
-    <dl class="kv"><dt>Claude</dt><dd>${s.claude.state === 'available' ? 'installed and available' : `<span class="badge danger">${esc(s.claude.state)}</span> ${esc(s.claude.detail)}`} · runs on ${s.auth === 'api_key' ? 'your API key' : 'your subscription'}</dd>
+    <dl class="kv"><dt>Claude</dt><dd>${s.claude.state === 'available' ? 'installed and available' : `<span class="badge danger">${esc(s.claude.state)}</span> ${esc(s.claude.detail)}`} · runs on ${s.auth === 'api_key' ? 'your legacy Anthropic API key' : "Claude's configured connection"}</dd>
       <dt>Service</dt><dd>${d.online ? 'running' : '<span class="badge danger">stopped</span>'} · panel on port ${s.port}</dd>
       <dt>Team folder</dt><dd><code>${esc(s.home)}</code></dd><dt>Kit</dt><dd><code>${esc(s.kit)}</code></dd></dl></section>
   <section><h2>History</h2>${orders.length ? `<div class="list mini">${orders.map((o) => `<div class="row row-2"><div><div class="small">${esc(o.summary)}</div><div class="meta">${esc(o.by)} · ${fmtTime(o.ts)}${o.result ? ' · ' + esc(o.result) : ''}</div></div><span class="badge ${o.status === 'failed' ? 'danger' : ''}">${esc(o.status)}</span></div>`).join('')}</div>` : '<p class="quiet">Nothing yet.</p>'}</section>
@@ -1228,6 +1258,12 @@ document.addEventListener('click', async (ev) => {
   else if (act === 'ob-routine' && S.ob) { S.ob.edit.routines[b.dataset.k] = !S.ob.edit.routines[b.dataset.k]; keepCard(); render(true); }
   else if (act === 'ob-budget' && S.ob) { S.ob.edit.budget = b.dataset.k; keepCard(); render(true); }
   else if (act === 'open-claude') { openClaude(b.dataset.emp, b); }
+  else if (act === 'open-desk') {
+    api('/api/desk', {}).then((r) => {
+      if (r.opened) toast(r.new ? 'Orbit\'s chat is opening in Claude. Press Enter there once: it sets itself up.' : 'Opening Orbit\'s chat in Claude.');
+      else { window.location.href = r.link; }
+    }).catch((e) => toast(e.message, 'err'));
+  }
   else if (act === 'connector') {
     b.disabled = true;
     await order({ kind: 'connector', employee_id: b.dataset.emp, ref: b.dataset.ref, name: b.dataset.name, off: !!b.dataset.off });

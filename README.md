@@ -5,12 +5,14 @@
 **Your AI workforce. In motion.**
 Build your team. Assign missions. Get things done.
 
-**New in 0.8.0:** Orbit runs natively on Windows 11. Microsoft Execution Containers (MXC) keep
-each crew shell command contained; WSL2 remains available as an explicit fallback.
+**Current source version: 0.12.0.** Orbit includes a native Windows 11 path. Microsoft Execution
+Containers (MXC) keep each crew shell command contained; WSL2 remains an explicit fallback. Native
+Windows release readiness is still blocked by the feature-003 containment work and real-host evidence
+described below.
 
 Add your first AI crew member in two minutes and watch it do a real piece of your work. It runs on
-your own computer (a Mac, a Windows PC or Linux), using the Claude Code connection you already have
-configured (no separate API bill from Orbit), and it can't spend, post or message
+your own computer (a Mac, a Windows PC or Linux), using Claude's configured connection through
+Claude Code (no separate API bill from Orbit), and it can't spend, post or message
 anyone but you. Early: built in the open, tested by a few people; tell us what breaks.
 
 **Who it's for:** founders who can't hire yet, freelancers with clients, product and design leads
@@ -40,9 +42,9 @@ the work you give them are **missions**; **Launch** starts one.
 
 **You need:** a Mac, a Windows PC (Windows 11 24H2 with current updates or newer; older or unsupported
 Windows builds follow the WSL fallback below) or a Linux PC, and a working Claude Code installation.
-Claude Code can use the connection you already configured — your own Claude plan, an organization
+Claude Code can use Claude's configured connection - your Claude account, an organization
 setup, or another supported configuration. Orbit only checks that the client is installed and runs;
-it never signs you in and doesn't require account sign-in for ordinary work. Nothing else is billed.
+it never signs you in and doesn't require account sign-in for ordinary work. Orbit adds no per-run bill.
 Every feature works on all three; the few setup differences are below.
 
 **The easy way, no Terminal.** Open the Claude app on your computer, go to **Code**, and paste:
@@ -55,8 +57,8 @@ is unavailable does it turn on WSL and type your password where one is needed. T
 you are and what your business does, pick a job, and your own Claude interviews you about it: a few
 tap-to-answer questions written for that job (your channels, goals, tone, what they may do alone,
 what access you'd give). It turns your answers into the crew member's card: responsibilities, first
-days, routines, the access they'll ask you for, and a weekly token budget. Launch, and Claude opens on
-your new crew member, who introduces themselves and gets to work.
+days, routines, the access they'll ask you for, and a weekly token budget. Launch, and your new crew
+member introduces themselves and gets to work.
 
 **In Terminal instead (Mac):**
 
@@ -95,15 +97,32 @@ the same one Claude Code uses on Linux.
 
 **On Linux** (Ubuntu, Debian or Fedora): steps 2 to 4 in a terminal.
 
-Windows and Linux support is new (November 2026). It's tested automatically on Ubuntu, on WSL and on
-Windows CI; the MXC sandbox itself (the per-command container on native Windows) is exercised on a real
-Windows 11 host following specs/001-windows-mxc-sandbox/quickstart.md, an on-demand guide — it isn't
-part of the automated test run. Please tell us what breaks.
+Windows and Linux support is new (November 2026). Unit behavior is tested automatically on Ubuntu,
+WSL and Windows CI. Native-Windows release readiness is **blocked**: feature 003's required containment
+implementation and candidate-bound x64/ARM64 real-host evidence do not exist yet. The older
+`specs/001-windows-mxc-sandbox/quickstart.md` guide is useful development coverage, not release proof.
 
-**Talking to your crew.** In Claude: every crew member has an **Open in Claude** button, a Claude
-session in their own folder with all of Claude's power and the same job, memory and safety locks. On
-your phone: Telegram, Slack or Discord (the panel connects it in about two minutes). And in the
-control panel: the team room for the whole crew, and each crew member's page.
+**Orbit in the Claude app.** If you live in Claude rather than a browser tab, `orbit desk` (or the panel's
+**Orbit in Claude**) opens Orbit's own control-plane chat: hire by talking, through the same interview as the
+panel; ask who's doing what and what they need from you; pause or change anyone. On Mac, Linux and WSL, each
+crew member can also have a Claude-app chat where their routines report with the unread dot. Native-Windows
+employee Desktop chats stay disabled until feature 003 is implemented; use the contained `orbit chat <handle>`.
+
+**Talking to your crew, and hearing from them.** Each crew member has **one running conversation**:
+its routines, its follow-ups and your messages are all turns of the same session. You reach it three ways,
+and everything it says reaches you on all of them:
+
+- **In the Claude app (Mac, Linux and WSL):** **Open in Claude** opens your chat with that crew member, in their own folder with
+  the same job, memory and locks. The first time, press Enter once: they set up their standup, midday
+  initiative, end of day and weekly review as alarms (the Claude app's own scheduled tasks). At each
+  routine's time the alarm messages that chat, they do the work right there, and the report waits for you
+  with the unread dot, like any Claude chat you leave running. You answer in the same chat. No Claude app, or
+  running natively on Windows? `orbit chat maya` opens that conversation in a contained terminal instead.
+- **In the control panel:** the team room, each crew member's Chat tab, and a count of what you haven't
+  seen. In a terminal: `orbit inbox`.
+- **On your phone:** Telegram, Slack or Discord (the panel connects it in about two minutes). Without a
+  phone, routine reports also pop up as notifications on this computer; on a Mac, the first one asks you
+  to allow notifications from Orbit.
 
 **Just want to look around first?** After cloning, `~/orbit/orbit demo` opens the control panel
 with a pretend team (invented business, canned replies, no bot, no Claude run). `orbit demo --stop`
@@ -149,6 +168,17 @@ and claim comes with a source link.
   numbers and changes what isn't working, bringing big changes to you as a decision.
 - **Routines:** morning brief, standup, a midday initiative, end of day, a weekly review, a daily
   self-improvement scout, and a weekly self-test. Each one can be switched on or off.
+- **One conversation, like a chat window that never closes:** every routine, follow-up and message from you is
+  a new turn of the same running conversation, so a crew member remembers the morning at the end of the day
+  and the week in its review, instead of waking up blank before each routine. Once the conversation has grown
+  heavy it starts fresh on the next day, and the files (plan, state, tasks, lessons) carry the memory across.
+  Where employee Desktop sessions are supported, **Open in Claude** opens that very conversation, so your chat
+  window and their workday are the same thing. Native Windows uses the contained `orbit chat` window instead.
+- **Nothing they say gets lost:** every report lands in the team room, on your phone when one is connected,
+  and otherwise as a notification on this computer; `orbit inbox` and the panel count what you haven't seen.
+- **A brain and hands:** the brain thinks and talks with you (standup, initiative, end of day, the weekly
+  review, chats) and is Opus by default, the same brain you get in your own Claude. The hands do the production
+  runs (follow-ups, the morning brief, scout, self-test) on Sonnet. Change either in Manage.
 - **Your computer first, then the cloud, so they don't stop when the lid closes:**
   1. **Your computer.** The crew runs here, on your hardware. Orbit keeps it awake while plugged in and during any
      job (Settings → Keep awake; closing a laptop's lid can still put it to sleep).
@@ -211,8 +241,8 @@ who don't live in Terminal: every setting is a button or a form.
 - **Today:** who's working on what right now, what needs you, what the team said, plan use.
 - **An employee's page:** **Chat** (with suggestions to try, what they can and can never do),
   **Knowledge** (the notes they keep, skills they learned or you taught, rules you set), **Work**
-  (every file they wrote, and every run with its steps) and **Manage** (pause, model, abilities,
-  run a routine now).
+  (every file they wrote, and every run with its steps) and **Manage** (pause, brain and hands,
+  abilities, run a routine now).
 - **Settings:** your business, workdays, routine times, the research budget and Apify token, chat
   channels, who may direct the team.
 
@@ -265,7 +295,7 @@ An autonomous agent that reads the open web needs locks, not promises. Every run
 ## What it costs
 
 - **Claude:** employees run through the official, unmodified Claude Code, using the connection you
-  already configured there — your own Claude plan, an organization setup, or another supported
+  already configured there — your Claude account, an organization setup, or another supported
   configuration. Orbit does not require account sign-in for ordinary work and never sees or stores
   those credentials. Billing follows your own agreement with Claude's provider; Orbit does not bill
   per run. For unattended routines and messages, keep that connection available to the background
@@ -273,10 +303,11 @@ An autonomous agent that reads the open web needs locks, not promises. Every run
   not a temporary shell export. The panel shows use in
   tokens, never dollars: each crew member's tokens this week against the weekly budget you gave them,
   and your plan's 5-hour and weekly limits when Claude reports them. Over budget, routines wait and
-  they still answer you. When usage is high,
-  employees switch to a lighter model on their own. A busy team uses a lot, so start with one or two
-  employees on Sonnet or Haiku. You can also use your own Anthropic API key
-  (`orbit secret anthropic`), billed to your Anthropic account.
+  they still answer you. When usage is high, employees switch to a lighter model on their own. A busy
+  team uses a lot: the brain (Opus) is where the tokens go, so a crew member on a tight plan can have a
+  Sonnet brain and Haiku hands, and a new team can start with one or two employees on Sonnet or Haiku.
+  You can also use your own Anthropic API key (`orbit secret anthropic`), billed to your Anthropic
+  account.
 - **Cloud Shift is separate and optional:** it needs a qualifying Claude account eligible for cloud
   sessions, and it is checked fresh before each cloud launch. It does not change ordinary local work.
 - **Apify** (optional, paid per use; the free plan includes monthly credit): only when you add a
@@ -288,11 +319,17 @@ An autonomous agent that reads the open web needs locks, not promises. Every run
 
 ```
 orbit setup | start | stop | restart | status | panel | logs | doctor
-orbit hire --name … --role … [--scope …] [--super] [--model opus|sonnet|haiku]
+orbit hire --name … --role … [--scope …] [--super] [--brain opus|sonnet|haiku] [--model opus|sonnet|haiku]
 orbit list | pause <h> | resume <h> | retire <h>
 orbit abilities <h> [--default | --super | --on a,b --off c]
 orbit skills [<h>] [--share NAME | --remove NAME | --export NAME DIR]
-orbit run <h> "message"          talk to an employee in the terminal
+orbit desk                       Orbit's own chat in the Claude app: hire, check and change your crew by talking
+orbit open <h>                   their own Claude-app chat (Mac/Linux/WSL; native Windows stays gated)
+orbit set <h> <field> <value>    brain, model, effort, scope, role, supervisor, weekly_tokens
+orbit routine <h> <job>          run one of their routines now
+orbit chat <h>                   their conversation in a terminal, right here
+orbit inbox [<h>] [--all]        what they said that you haven't seen
+orbit run <h> "message"          one message, one answer, in the terminal
 orbit secret telegram|slack|discord|apify|anthropic
 orbit group <chat id> [--channel telegram|slack|discord]   the team chat
 ```
@@ -318,7 +355,7 @@ orbit group <chat id> [--channel telegram|slack|discord]   the team chat
 ```
 ~/orbit/                 the kit (this repository; update with git pull)
   orbit                      the command (`staff` still works)
-  core/engine.py             runs one employee turn: claude -p + sandbox + guard + abilities
+  core/engine.py             runs one employee turn in its running conversation: claude -p + sandbox + guard + abilities
   core/staffd.py             the service: chat channels, routines, reminders, team bus, control panel
   core/channels/             one adapter per chat channel (telegram, slack, discord)
   core/abilities.json        the ability catalog (what the checkboxes mean)
