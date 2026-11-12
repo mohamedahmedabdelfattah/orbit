@@ -253,8 +253,12 @@ def resolve_claude() -> str:
     c = shutil.which("claude")
     if c:
         return c
-    for pat in (H + "/.local/bin/claude", H + "/.claude/local/claude", "/opt/homebrew/bin/claude",
-                "/usr/local/bin/claude", H + "/.nvm/versions/node/*/bin/claude"):
+    pats = [H + "/.local/bin/claude", H + "/.claude/local/claude", "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude", H + "/.nvm/versions/node/*/bin/claude"]
+    if os.name == "nt":                                # Windows installs end in .exe/.cmd, which
+        pats = [p + e for p in pats for e in ("", ".exe", ".cmd")] + \
+               [H + "/AppData/Local/Programs/claude*/claude.exe"]
+    for pat in pats:
         found = sorted(glob.glob(pat))
         if found:
             return found[-1]

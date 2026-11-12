@@ -394,6 +394,41 @@ class NativeService(unittest.TestCase):
         self.assertTrue(any("existing one" in line for line in said), said)
 
     @unittest.skipUnless(os.name == "nt", "signal names are platform state")
+    def test_service_run_uses_this_platforms_path_separator(self):
+        """service_run once joined PATH with ':' — POSIX-only — so the service's whole environment had
+        one unusable PATH blob on Windows: claude (and everything else) became FileNotFoundError."""
+        home = tempfile.mkdtemp(dir=TMP)
+        seen = {}
+        code = (
+            "import importlib.machinery, importlib.util, os, subprocess, sys, types\n"
+            "loader = importlib.machinery.SourceFileLoader('orbit_cli', r'%s')\n"
+            "spec = importlib.util.spec_from_loader('orbit_cli', loader)\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "loader.exec_module(m)\n"
+            "m.SERVICE_PID = r'%s'\n"
+            "def fake_popen(argv, **kw):\n"
+            "    seen = kw['env']['PATH']\n"           # noqa: F841 - captured in the parent via exit code
+            "    os.makedirs(r'%s', exist_ok=True)\n"
+            "    open(r'%s', 'w').write(kw['env']['PATH'])\n"
+            "    return types.SimpleNamespace(wait=lambda *a: 1)\n"
+            "m.subprocess.Popen = fake_popen\n"
+            "m.time.sleep = lambda *a: (_ for _ in ()).throw(KeyboardInterrupt())\n"
+            "try:\n"
+            "    m.service_run()\n"
+            "except KeyboardInterrupt:\n"
+            "    pass\n")
+        pid_file = os.path.join(home, "team", "service.pid")
+        path_file = os.path.join(home, "team", "seen-path.txt")
+        r = subprocess.run([sys.executable, "-c", code % (os.path.join(KIT, "orbit"), pid_file, home, path_file)],
+                           env=dict(os.environ, STAFFROOM_HOME=home), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(path_file, encoding="utf-8") as fh:
+            seen_path = fh.read()
+        parts = seen_path.split(os.pathsep)
+        self.assertGreater(len(parts), 1, seen_path)     # not one unusable blob
+        self.assertTrue(all(os.path.isdir(p) for p in parts), seen_path)
+
+    @unittest.skipUnless(os.name == "nt", "signal names are platform state")
     def test_service_run_never_touches_posix_only_signals(self):
         """service_run died on native Windows at signal.SIGHUP (AttributeError) right after writing its
         pid file — invisible under pythonw, no staffd.out, nothing. The body must run clean here."""
@@ -2398,6 +2433,27 @@ class ClaudeAvailability(unittest.TestCase):
         self.assertIn("repair", msg.lower())
         self.assertNotIn("auth login", msg.lower())
         self.assertNotIn("sign", msg.lower())
+
+    @unittest.skipUnless(os.name == "nt", "Windows install layout")
+    def test_windows_finds_claude_exe_without_path_help(self):
+        """The service runs with a minimal PATH: resolve_claude must still find the Windows installer's
+        ~/.local/bin/claude.exe (the POSIX globs once matched nothing, so hiring broke with
+        FileNotFoundError before Claude was even asked)."""
+        profile = tempfile.mkdtemp(dir=TMP)
+        bin_dir = os.path.join(profile, ".local", "bin")
+        os.makedirs(bin_dir)
+        exe = os.path.join(bin_dir, "claude.exe")
+        with open(exe, "w") as fh:
+            fh.write("fake")
+        code = "import engine; print(engine.resolve_claude() or 'none')"
+        r = subprocess.run([sys.executable, "-c", code],
+                           env={"USERPROFILE": profile, "SYSTEMDRIVE": "C:",
+                                "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+                                "PATH": os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "System32"),
+                                "ORBIT_OS": "windows", "PYTHONPATH": os.path.join(KIT, "core")},
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.path.normcase(r.stdout.strip()), os.path.normcase(exe))
 
 
 class SignedOutSetup(unittest.TestCase):

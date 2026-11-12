@@ -453,14 +453,19 @@ def stop_service_run():
     pid = service_pid()
     if not pid:
         return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return
-    for _ in range(20):
-        if not service_pid():
-            break
-        time.sleep(0.5)
+    if osinfo.KIND == "windows":
+        # os.kill is a hard TerminateProcess here and orphans the staffd child (two instances then
+        # fight over the chat channels): taskkill's tree kill takes the watchdog and its children.
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return
+        for _ in range(20):
+            if not service_pid():
+                break
+            time.sleep(0.5)
     if osinfo.KIND == "windows":                       # the killed watchdog can't clean up its own file
         try:                                           # (Windows sees a terminated pid as still alive)
             os.remove(SERVICE_PID)
@@ -498,7 +503,8 @@ def service_run():
     signal.signal(signal.SIGINT, end)
     if hasattr(signal, "SIGHUP"):                      # POSIX only; native Windows has no SIGHUP
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    env = dict(os.environ, STAFFROOM_HOME=engine.HOME, PATH=":".join(osinfo.path_dirs()))
+    env = dict(os.environ, STAFFROOM_HOME=engine.HOME,
+               PATH=os.pathsep.join(osinfo.path_dirs()))   # os.pathsep: ";" on Windows, ":" on POSIX
     out = open(os.path.join(engine.HOME, "team", "staffd.out"), "ab")
     while True:
         child[:] = [subprocess.Popen([sys.executable, os.path.join(KIT, "core", "staffd.py")], env=env,
