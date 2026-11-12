@@ -29,14 +29,14 @@ Function Have($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 # 0/ the Windows itself: MXC's ProcessContainer support starts on updated 24H2 builds
 $build = [version](Get-CimInstance Win32_OperatingSystem).Version
 if ($build -lt [version]"10.0.26100") {
-    Step "0/4" "Windows $build"
+    Step "0/5" "Windows $build"
     Write-Host "   Orbit's sandbox needs Windows 11 24H2 with current updates or newer (this is $build)."
     Write-Host "   Without it the crew runs in WSL2 mode instead: install WSL and use the"
     Write-Host "   Linux steps in docs/SETUP.md ('Windows through WSL')."
     exit 1
 }
 
-Step "1/4" "The programs (winget installs them for you, no admin)…"
+Step "1/5" "The programs (winget installs them for you, no admin)…"
 foreach ($id in @("Python.Python.3.12", "Git.Git", "Gyan.FFmpeg", "UB-Mannheim.TesseractOCR")) {
     if (Have "winget") {
         winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements 2>$null
@@ -56,7 +56,7 @@ if (-not $PYTHON) {
     exit 1
 }
 
-Step "2/4" "The MXC sandbox runtime (the boundary for every shell command your crew runs)…"
+Step "2/5" "The MXC sandbox runtime (the boundary for every shell command your crew runs)…"
 $VENDOR = Join-Path $KIT "vendor\mxc"
 New-Item -ItemType Directory -Force -Path $VENDOR | Out-Null
 $EXE = Join-Path $VENDOR "wxc-exec.exe"
@@ -96,17 +96,34 @@ if ($installed -eq $MXC_VERSION -and $signed) {
     Write-Host "   MXC runtime v$MXC_VERSION installed (checksum and Microsoft signature verified)."
 }
 
-Step "3/4" "Python packages for the page reader, the browser, the chat channels and documents (your user only)…"
+Step "3/5" "The orbit command (so 'orbit doctor' works in every new PowerShell window)…"
+$SHIMS = Join-Path $env:LOCALAPPDATA "Programs\Orbit\bin"
+New-Item -ItemType Directory -Force -Path $SHIMS | Out-Null
+foreach ($name in @("orbit", "staff")) {
+    # like install.sh's ~/.local/bin symlink on a Mac or Linux: the kit's script, by absolute path
+    [IO.File]::WriteAllText((Join-Path $SHIMS "$name.cmd"),
+        "@echo off`r`n`"$PYTHON`" `"$KIT\$name`" %*`r`n", (New-Object Text.ASCIIEncoding))
+}
+$upath = [Environment]::GetEnvironmentVariable("Path", "User")
+if (($upath -split ";") -notcontains $SHIMS) {
+    [Environment]::SetEnvironmentVariable("Path", ($upath.TrimEnd(";") + ";" + $SHIMS), "User")
+    Write-Host "   Added $SHIMS to your PATH: open a new window and `orbit` works everywhere."
+} else {
+    Write-Host "   The orbit command is in place."
+}
+
+Step "4/5" "Python packages for the page reader, the browser, the chat channels and documents (your user only)…"
 # This is the native equivalent of install.sh's Python step: pypdf powers the document pipeline, and
 # Playwright's package plus Chromium powers the same headless-browser flow on every platform.
 & $PYTHON -m pip install --user --quiet --upgrade requests beautifulsoup4 playwright websocket-client pypdf
 & $PYTHON -m playwright install chromium
 
-Step "4/4" "Next steps (in this window)…"
+Step "5/5" "Next steps (in this window)…"
 Write-Host "   1. Claude Code, if the crew's brain isn't on this PC yet: install it from"
 Write-Host "      https://claude.com/claude-code, then run this script again. Sign-in is Claude's own"
 Write-Host "      business (use the connection you already have)."
-Write-Host "   2. Set up the team:  & `"$PYTHON`" `"$KIT\orbit`" setup"
+Write-Host "   2. Set up the team (in a new PowerShell window, so the orbit command is on PATH):"
+Write-Host "      orbit setup"
 Write-Host "      (checks, your business, your chat bot, your first hire)."
 Write-Host ""
 Write-Host "Done. If anything failed, rerun this script; each step is safe to repeat."

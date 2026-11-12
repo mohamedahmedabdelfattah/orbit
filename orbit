@@ -329,6 +329,9 @@ def windows_checks():
     found = osinfo.which("tesseract")
     out.append((bool(found), "tesseract (reading scans and photos)%s" % (
         "" if found else ": setup-windows.ps1 installs it (winget install UB-Mannheim.TesseractOCR)"), False))
+    out.append((bool(osinfo.which("orbit")), "the orbit command%s" % (
+        "" if osinfo.which("orbit") else ": run setup-windows.ps1 again — it puts `orbit` on your PATH "
+        "(until then: python <the kit>\\orbit)"), False))
     return out
 
 
@@ -386,6 +389,8 @@ def stop():
         launchctl("bootout", "gui/%d/%s" % (os.getuid(), LABEL))
     elif osinfo.KIND == "windows":
         win_ps("Unregister-ScheduledTask -TaskName 'Orbit' -Confirm:$false -ErrorAction SilentlyContinue")
+        win_ps("Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Startup')) 'Orbit.lnk') "
+               "-ErrorAction SilentlyContinue")
         stop_service_run()
     elif os.path.exists(UNIT) and systemd_user():
         subprocess.run(["systemctl", "--user", "stop", "orbit.service"], capture_output=True)
@@ -491,7 +496,8 @@ def service_run():
         os._exit(0)
     signal.signal(signal.SIGTERM, end)
     signal.signal(signal.SIGINT, end)
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    if hasattr(signal, "SIGHUP"):                      # POSIX only; native Windows has no SIGHUP
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
     env = dict(os.environ, STAFFROOM_HOME=engine.HOME, PATH=":".join(osinfo.path_dirs()))
     out = open(os.path.join(engine.HOME, "team", "staffd.out"), "ab")
     while True:
@@ -562,6 +568,32 @@ def win_task_script():
             % (os.path.join(engine.HOME, ".runtime", "orbit-service.cmd"), KIT))
 
 
+def win_task_exists() -> bool:
+    """Is the 'Orbit' scheduled task already there? A denied re-registration may still leave one."""
+    r = win_ps("if (Get-ScheduledTask -TaskName 'Orbit' -ErrorAction SilentlyContinue) { 'yes' } else { 'no' }")
+    return r.returncode == 0 and "yes" in r.stdout
+
+
+def startup_shortcut_script() -> str:
+    """PowerShell that writes the Startup-folder shortcut (starts the service hidden at every Windows
+    login) and runs the shortcut's command now — the fallback where Task Scheduler's registration is
+    denied without elevation (Access is denied, 0x80070005), the way the WSL mode already starts."""
+    cmd = os.path.join(engine.HOME, ".runtime", "orbit-service.cmd")
+    return ("$lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Orbit.lnk'\n"
+            "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)\n"
+            "$s.TargetPath = \"$env:WINDIR\\System32\\conhost.exe\"\n"
+            "$s.Arguments = '--headless \"%s\"'\n"
+            "$s.WorkingDirectory = '%s'\n"
+            "$s.WindowStyle = 7\n"
+            "$s.Description = 'Orbit: your AI crew'\n"
+            "$s.Save()\n"
+            "$si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow = [uint16]0}\n"
+            "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{\n"
+            "  CommandLine = '\"' + $s.TargetPath + '\" ' + $s.Arguments; ProcessStartupInformation = $si}\n"
+            "if ($r.ReturnValue -ne 0) { throw \"Windows couldn't start it (Win32_Process.Create: $($r.ReturnValue))\" }\n"
+            % (cmd, KIT))
+
+
 def start_windows():
     """Native Windows: the 'Orbit' task (contracts/service-task.md) is written again — idempotent — and
     started now; at every login Task Scheduler starts it itself. The staffd_alive stamp says it's up."""
@@ -571,8 +603,17 @@ def start_windows():
                  % (engine.HOME, service_pythonw(), os.path.join(KIT, "orbit")))
     r = win_ps(win_task_script())
     if r.returncode != 0:
-        say("Couldn't create the scheduled task: %s" % (r.stderr.strip()[-300:] or r.stdout.strip()[-300:]))
-        return False
+        if win_task_exists():
+            say("Task Scheduler wouldn't re-register the task without admin rights; the existing one "
+                "still runs the team (its command is rewritten on every start).")
+        else:
+            say("Task Scheduler denied the task's registration without admin rights; the Startup folder "
+                "takes over — it starts the team at login all the same.")
+            r = win_ps(startup_shortcut_script())
+            if r.returncode != 0:
+                say("Couldn't set up the Startup shortcut either: %s"
+                    % (r.stderr.strip()[-300:] or r.stdout.strip()[-300:]))
+                return False
     win_ps("Start-ScheduledTask -TaskName 'Orbit'")
     for _ in range(30):
         if running():

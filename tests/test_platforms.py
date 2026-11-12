@@ -360,6 +360,65 @@ class NativeService(unittest.TestCase):
         self.assertIn("orbit sandbox wsl2", runtime)
         self.assertNotIn("setup-linux.sh", runtime)
 
+    def _fake_ps(self, scripts, register_rc=1, task_exists="no"):
+        """win_ps that captures each script; the task's registration is denied, other calls succeed."""
+        import types
+        def fake(script):
+            scripts.append(script)
+            rc = register_rc if "Register-ScheduledTask" in script else 0
+            return types.SimpleNamespace(returncode=rc, stdout=task_exists if "Get-ScheduledTask" in script else "",
+                                         stderr="Access is denied" if rc else "")
+        return fake
+
+    def test_start_windows_falls_back_to_the_startup_shortcut_when_registration_is_denied(self):
+        scripts, said = [], []
+        with mock.patch.object(self.cli, "service_pythonw", return_value=sys.executable), \
+                mock.patch.object(self.cli, "win_ps", side_effect=self._fake_ps(scripts)), \
+                mock.patch.object(self.cli, "running", return_value=True), \
+                mock.patch.object(self.cli, "say", side_effect=said.append):
+            self.assertTrue(self.cli.start_windows())
+        fallback = [s for s in scripts if "GetFolderPath('Startup')" in s]
+        self.assertEqual(len(fallback), 1)
+        self.assertIn("orbit-service.cmd", fallback[0])
+        self.assertIn("Win32_Process", fallback[0])
+        self.assertTrue(any("Startup folder" in line for line in said), said)
+
+    def test_start_windows_keeps_an_existing_task_when_registration_is_denied(self):
+        scripts, said = [], []
+        with mock.patch.object(self.cli, "service_pythonw", return_value=sys.executable), \
+                mock.patch.object(self.cli, "win_ps", side_effect=self._fake_ps(scripts, task_exists="yes")), \
+                mock.patch.object(self.cli, "running", return_value=True), \
+                mock.patch.object(self.cli, "say", side_effect=said.append):
+            self.assertTrue(self.cli.start_windows())
+        self.assertEqual([s for s in scripts if "GetFolderPath('Startup')" in s], [])
+        self.assertTrue(any("existing one" in line for line in said), said)
+
+    @unittest.skipUnless(os.name == "nt", "signal names are platform state")
+    def test_service_run_never_touches_posix_only_signals(self):
+        """service_run died on native Windows at signal.SIGHUP (AttributeError) right after writing its
+        pid file — invisible under pythonw, no staffd.out, nothing. The body must run clean here."""
+        home = tempfile.mkdtemp(dir=TMP)
+        code = (
+            "import importlib.machinery, importlib.util, os, subprocess, sys, types\n"
+            "loader = importlib.machinery.SourceFileLoader('orbit_cli', r'%s')\n"
+            "spec = importlib.util.spec_from_loader('orbit_cli', loader)\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "loader.exec_module(m)\n"
+            "m.SERVICE_PID = r'%s'\n"
+            "m.subprocess.Popen = lambda *a, **k: types.SimpleNamespace(wait=lambda *a: 1)\n"
+            "m.time.sleep = lambda *a: (_ for _ in ()).throw(KeyboardInterrupt())\n"
+            "try:\n"
+            "    m.service_run()\n"
+            "    print('returned')\n"
+            "except KeyboardInterrupt:\n"
+            "    print('ran-clean')\n")
+        pid_file = os.path.join(home, "team", "service.pid")
+        r = subprocess.run([sys.executable, "-c", code % (os.path.join(KIT, "orbit"), pid_file)],
+                           env=dict(os.environ, STAFFROOM_HOME=home), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("AttributeError", r.stderr)
+        self.assertEqual(r.stdout.strip(), "ran-clean")
+
     @unittest.skipUnless(os.name == "nt", "Windows console encoding")
     def test_doctor_survives_a_cp1252_console(self):
         """A Windows console/pipe defaults to cp1252, which cannot encode Orbit's ✓/✗: doctor must not
