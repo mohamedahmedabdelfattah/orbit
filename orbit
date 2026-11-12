@@ -54,6 +54,14 @@ sys.path.insert(0, os.path.join(KIT, "core", "tools"))
 import engine  # noqa: E402
 import osinfo  # noqa: E402
 
+if osinfo.KIND == "windows":
+    # Windows' console and pipes default to cp1252, which can't encode Orbit's ✓/✗ output and
+    # crashed doctor/setup; Claude Code and terminals read UTF-8, so emit UTF-8, never crash.
+    for _stream in (sys.stdout, sys.stderr):
+        if (getattr(_stream, "encoding", "") or "").lower() not in ("utf-8", "utf8") \
+                and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+
 LABEL = "com.staffroom.staffd"
 PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LABEL)
 UNIT = os.path.expanduser("~/.config/systemd/user/orbit.service")         # Linux with systemd

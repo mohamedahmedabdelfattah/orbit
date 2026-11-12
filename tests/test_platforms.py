@@ -360,6 +360,19 @@ class NativeService(unittest.TestCase):
         self.assertIn("orbit sandbox wsl2", runtime)
         self.assertNotIn("setup-linux.sh", runtime)
 
+    @unittest.skipUnless(os.name == "nt", "Windows console encoding")
+    def test_doctor_survives_a_cp1252_console(self):
+        """A Windows console/pipe defaults to cp1252, which cannot encode Orbit's ✓/✗: doctor must not
+        crash on it (it once exited with UnicodeEncodeError before printing any check)."""
+        home = tempfile.mkdtemp(dir=TMP)
+        r = subprocess.run([sys.executable, os.path.join(KIT, "orbit"), "doctor"],
+                           env=dict(os.environ, PYTHONIOENCODING="cp1252", STAFFROOM_HOME=home),
+                           capture_output=True, timeout=300)
+        self.assertNotIn(b"UnicodeEncodeError", r.stderr)
+        out = r.stdout.decode("utf-8", "replace")
+        self.assertIn("Windows", out)                        # the checks really printed, not a crash
+        self.assertIn(r.returncode, (0, 1))
+
 
 class Documents(unittest.TestCase):
     def setUp(self):
@@ -1917,6 +1930,38 @@ class NativeWindows(unittest.TestCase):
     def test_wsl_runs_still_wall_off_the_windows_drives(self):
         out = self.win_py("import engine; print(any(p == '/mnt' for p in engine.SECRET_PATHS))", "wsl")
         self.assertEqual(out.strip(), "True")
+
+    @unittest.skipUnless(os.name == "nt", "real Windows paths")
+    def test_crew_browser_found_where_windows_installers_put_it(self):
+        """Chrome's Windows installer never adds itself to PATH, and the kit's own Playwright Chromium
+        lives under LOCALAPPDATA: browser.chrome() must find both, or doctor keeps saying 'no Chrome'.
+        The roots are set in-process (os.environ) because some Windows builds rewrite the child
+        environment block's shell-folder variables at process creation."""
+        pf, la = tempfile.mkdtemp(dir=TMP), tempfile.mkdtemp(dir=TMP)
+        os.makedirs(os.path.join(pf, "Google", "Chrome", "Application"))
+        os.makedirs(os.path.join(la, "ms-playwright", "chromium-9999", "chrome-win64"))
+        app = os.path.join(pf, "Google", "Chrome", "Application")
+        with open(os.path.join(app, "chrome.exe"), "w") as fh:
+            fh.write("fake")
+        exe = os.path.join(la, "ms-playwright", "chromium-9999", "chrome-win64", "chrome.exe")
+        with open(exe, "w") as fh:
+            fh.write("fake")
+        code = ("import os, sys;"
+                "os.environ['ProgramFiles'] = os.environ['ProgramFiles(x86)'] = sys.argv[1];"
+                "os.environ['LOCALAPPDATA'] = sys.argv[2];"
+                "import browser; print(browser.chrome() or 'none')")
+        env = dict(os.environ, ORBIT_OS="windows", PYTHONPATH=os.path.join(KIT, "core"))
+        r = subprocess.run([sys.executable, "-c", code, pf, la], env=env, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(os.path.normcase(r.stdout.strip()),
+                         os.path.normcase(os.path.join(app, "chrome.exe")))   # real Chrome wins
+        os.remove(os.path.join(app, "chrome.exe"))
+        r = subprocess.run([sys.executable, "-c", code, pf, la], env=env, capture_output=True, text=True)
+        self.assertEqual(os.path.normcase(r.stdout.strip()),
+                         os.path.normcase(exe))                              # then the setup's Chromium
+        os.remove(exe)
+        r = subprocess.run([sys.executable, "-c", code, pf, la], env=env, capture_output=True, text=True)
+        self.assertEqual(r.stdout.strip(), "none")                           # none: doctor says so honestly
 
     # --- the sandbox shape of a native run (T033)
     def test_windows_runs_carry_the_containment_hook_not_fail_unavailable(self):

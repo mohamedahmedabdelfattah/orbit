@@ -90,6 +90,20 @@ def chrome():
                 if os.access(os.path.join(root, app), os.X_OK):
                     return os.path.join(root, app)
         pattern = "~/Library/Caches/ms-playwright/chromium-*/chrome-mac*/*.app/Contents/MacOS/*"
+    elif osinfo.KIND == "windows":
+        # Chrome's Windows installer never adds itself to PATH, and the setup's Playwright Chromium
+        # lives under LOCALAPPDATA: look where installers actually put them. The shell-folder env
+        # names arrive in any case ("ProgramFiles"), so match case-insensitively.
+        env = {k.lower(): v for k, v in os.environ.items()}
+        for p in (os.path.join(env.get("programfiles") or r"C:\Program Files",
+                               r"Google\Chrome\Application\chrome.exe"),
+                  os.path.join(env.get("programfiles(x86)") or r"C:\Program Files (x86)",
+                               r"Google\Chrome\Application\chrome.exe"),
+                  os.path.join(env.get("localappdata") or "", r"Google\Chrome\Application\chrome.exe")):
+            if p and os.access(p, os.X_OK):
+                return p
+        pattern = os.path.join(env.get("localappdata") or "", "ms-playwright",
+                               "chromium-*", "chrome-win*", "chrome.exe")
     else:
         for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
             if osinfo.which(name):
@@ -167,7 +181,8 @@ def install(timeout: int = 300) -> str:
         raise BrowserError("Node.js 20 or newer is missing (free, from nodejs.org)")
     if installed() == PKG_VERSION:
         return PKG_VERSION
-    npm = os.path.join(os.path.dirname(n), "npm")
+    # Windows' npm is a launcher script: without .cmd, CreateProcess fails with WinError 193.
+    npm = os.path.join(os.path.dirname(n), "npm.cmd" if osinfo.KIND == "windows" else "npm")
     os.makedirs(MCP_DIR, exist_ok=True)
     pkg = os.path.join(MCP_DIR, "package.json")
     if not os.path.exists(pkg):
