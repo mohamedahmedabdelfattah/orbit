@@ -122,7 +122,7 @@ def keep_awake_cmd(pid: int, battery: bool = False, seconds: int = 0):
     return None
 
 
-RUNTIME = os.path.join(os.path.expanduser(os.environ.get("STAFFROOM_HOME", "~/Staff")), ".runtime")
+RUNTIME = os.path.normpath(os.path.join(os.path.expanduser(os.environ.get("STAFFROOM_HOME", "~/Staff")), ".runtime"))
 NOTIFIER = os.path.join(RUNTIME, "Orbit.app")             # a tiny Mac app whose only job is to show notifications
 NOTIFIER_VERSION = "2"                                    # 2: re-signed after the Info.plist edits (1 was dropped by macOS)
 APPLET = """on run

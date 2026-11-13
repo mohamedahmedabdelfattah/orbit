@@ -21,7 +21,7 @@ import urllib.parse
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.dirname(TOOLS)
 KIT = os.path.dirname(CORE)
-HOME = os.path.expanduser(os.environ.get("STAFFROOM_HOME", "~/Staff"))
+HOME = os.path.normpath(os.path.expanduser(os.environ.get("STAFFROOM_HOME", "~/Staff")))
 
 
 def config() -> dict:

@@ -46,7 +46,9 @@ BIN = os.path.join(KIT, "bin")
 SKILLS = os.path.join(CORE, "skills")
 GUARD = os.path.join(CORE, "guard", "staff-guard")
 H = os.path.expanduser("~")
-HOME = os.path.expanduser(os.environ.get("STAFFROOM_HOME", "~/Staff"))
+HOME = os.path.normpath(os.path.expanduser(os.environ.get("STAFFROOM_HOME", "~/Staff")))
+# normpath: expanduser keeps the '/' in "~/Staff" on Windows, and cmd.exe then reads every path built on
+# HOME as a mklink switch ("Invalid switch - Staff\.runtime\...")
 REGISTRY = os.path.join(HOME, "staff.json")
 SECRETS = os.path.join(HOME, ".secrets")
 

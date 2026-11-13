@@ -1781,7 +1781,8 @@ class CloudAccount(unittest.TestCase):
             self.assertEqual(env["TMP"], tempfile.gettempdir())
             self.assertEqual(env["USERPROFILE"], engine.H)
             allowed = {"PATH", "HOME", "TEMP", "TMP", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SYSTEMROOT",
-                       "WINDIR", "COMSPEC", "PATHEXT", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA"}
+                       "WINDIR", "COMSPEC", "PATHEXT", "USERNAME", "USERDOMAIN", "APPDATA", "LOCALAPPDATA",
+                       "PROGRAMDATA", "PYTHONUTF8"}
         else:
             self.assertEqual(env["TMPDIR"], tempfile.gettempdir())
             allowed = {"PATH", "HOME", "TMPDIR", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE"}
@@ -2010,6 +2011,15 @@ class NativeWindows(unittest.TestCase):
                                      "[osinfo.win_path(r'C:\\x'), osinfo.win_env('APPDATA') != '', "
                                      "osinfo.win_python() == [sys.executable]]))"))
         self.assertEqual(win, [r"C:\x", True, True])        # native Windows: no wslpath/cmd.exe/py.exe hops
+
+    @unittest.skipUnless(os.name == "nt", "real Windows paths")
+    def test_home_built_on_the_default_has_no_forward_slashes(self):
+        """expanduser('~/Staff') keeps the '/' on Windows ('C:\\Users\\me/Staff'), and a path built on
+        HOME is then read by cmd.exe as a switch: mklink says 'Invalid switch - "Staff\\.runtime\\..."'
+        and every routine dies before it starts. normpath must remove it."""
+        out = self.win_py("import os; os.environ.pop('STAFFROOM_HOME', None); import engine; print(engine.HOME)").strip()
+        self.assertNotIn("/", out)
+        self.assertTrue(out.endswith("\\Staff"), out)
 
     # --- secrets (T013)
     def test_windows_secrets_are_the_windows_stores(self):
