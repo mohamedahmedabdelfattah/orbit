@@ -432,7 +432,8 @@ def sandboxed() -> bool:
 
 
 def sandbox_blob(emp: dict, unsandboxed: list) -> dict:
-    """The run's sandbox settings when the optional team sandbox or mandatory native MXC is active:
+    """The run's sandbox settings when the optional team sandbox or native MXC (not opted out) is
+    active:
     its folder, no secrets, no colleagues. Network: the approved sites only, or (Full autonomy) any
     site, with the filesystem limits unchanged. On native Windows the built-in sandbox doesn't exist,
     so the failIfUnavailable requirement is omitted (the agent starts normally) and containment arrives
@@ -463,8 +464,12 @@ def settings_json(emp: dict, unsandboxed: list) -> str:
     "sandbox", off by default since 0.13) decides: on means the folder, no secrets, no colleagues and
     the approved sites only (or any site with Full autonomy), with the filesystem limits unchanged;
     off means no sandbox. On a native Windows PC the machine's own containment decides instead: in
-    mxc mode every shell command runs in its Microsoft Execution Container, flag or no flag."""
-    if not sandboxed() and not (osinfo.KIND == "windows" and recorded_sandbox_mode() == "mxc"):
+    mxc mode every shell command runs in its Microsoft Execution Container — unless the owner opted
+    out with an explicit "sandbox": false (`orbit sandbox off`, or No at setup): then no sandbox and
+    no hook, exactly like the other platforms. An absent key (every install before it chose) keeps
+    MXC on: upgrading never unsandboxes anyone silently."""
+    if not sandboxed() and not (osinfo.KIND == "windows" and recorded_sandbox_mode() == "mxc"
+                                and registry().get("sandbox") is not False):
         return json.dumps({"enabledPlugins": {}, "sandbox": {"enabled": False}})
     return json.dumps(sandbox_blob(emp, unsandboxed))
 

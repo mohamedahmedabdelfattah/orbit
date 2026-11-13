@@ -2194,13 +2194,17 @@ class OwnBrowser(unittest.TestCase):
         engine.claude_session = lambda eid: None                    # the Claude chats are tested elsewhere
         try:
             cli.say = lambda *a: None
+            cli.yes = lambda *a, **k: True                          # the Windows MXC-off confirmation
             cli.sandbox_cmd("on")
             self.assertTrue(engine.sandboxed())
             s = json.loads(engine.settings_json(engine.employee("tess"), []))
             self.assertTrue(s["sandbox"]["enabled"])
             cli.sandbox_cmd("off")
             self.assertFalse(engine.sandboxed())
-            self.assertNotIn("sandbox", engine.registry())
+            self.assertIs(engine.registry().get("sandbox"), False)  # explicit opt-out, no longer the old pop
+            s = json.loads(engine.settings_json(engine.employee("tess"), []))
+            self.assertEqual(s, {"enabledPlugins": {}, "sandbox": {"enabled": False}})
+            self.assertNotIn("hooks", s)                            # on Windows too: no MXC hook after the opt-out
         finally:
             engine.claude_session = real
 

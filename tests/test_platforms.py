@@ -2390,6 +2390,225 @@ class Mode(unittest.TestCase):
         self.assertEqual(mxc.mode_info(reg)["sandbox_mode"], "mxc")
 
 
+class SandboxOptOut(unittest.TestCase):
+    """The owner's explicit opt-out ("sandbox": false): on native Windows mxc mode it removes the MXC
+    hook, an absent key (every pre-choice install) keeps it on, and only the explicit False counts.
+    The settings shape runs in an ORBIT_OS=windows subprocess (module state is really that kind's);
+    the CLI choice runs in-process against the registry."""
+
+    def setUp(self):
+        self.kind = osinfo.KIND
+        reg = engine.registry()
+        reg.pop("sandbox", None)
+        reg.pop("platform", None)                           # the mxc default, like a fresh install
+        engine.save_registry(reg)
+
+    def tearDown(self):
+        osinfo.KIND = self.kind
+        reg = engine.registry()
+        reg.pop("sandbox", None)
+        reg.pop("platform", None)
+        engine.save_registry(reg)
+
+    def _settings(self, sandbox_value, kind="windows"):
+        code = ("import os, json, tempfile;"
+                "home = tempfile.mkdtemp(); os.environ['STAFFROOM_HOME'] = home;"
+                "import engine;"
+                "engine.save_registry({} if %(v)r == 'absent' else {'sandbox': %(v)r});"
+                "print(json.dumps(json.loads(engine.settings_json("
+                "{'id': 't', 'workspace': '.', 'name': 't'}, []))))") % {"v": sandbox_value}
+        r = win_py(code, kind)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)
+
+    def test_a_windows_default_keeps_mxc(self):             # T004: absent key == containment on
+        s = self._settings("absent")
+        self.assertTrue(s["sandbox"]["enabled"])
+        self.assertIn("hooks", s)
+
+    def test_an_explicit_false_removes_the_mxc_hook(self):  # the owner's opt-out is honored
+        self.assertEqual(self._settings(False), {"enabledPlugins": {}, "sandbox": {"enabled": False}})
+
+    def test_sandbox_true_still_carries_the_hook(self):
+        s = self._settings(True)
+        self.assertTrue(s["sandbox"]["enabled"])
+        self.assertIn("hooks", s)
+
+    def test_the_other_platforms_never_change(self):        # T004: byte-identical off/on states
+        self.assertEqual(self._settings("absent", "mac"), {"enabledPlugins": {}, "sandbox": {"enabled": False}})
+        self.assertEqual(self._settings(False, "mac"), {"enabledPlugins": {}, "sandbox": {"enabled": False}})
+        mac_on = self._settings(True, "mac")
+        self.assertTrue(mac_on["sandbox"]["enabled"] and mac_on["sandbox"]["failIfUnavailable"])
+        self.assertNotIn("hooks", mac_on)
+
+    def _cli(self, yes_answer=None):
+        """orbit_cli with quiet output and a scripted confirmation; yes_answer None means
+        the confirmation must never be asked."""
+        cli = orbit_cli()
+        asked = []
+
+        def fake_yes(q, default=True):
+            if yes_answer is None:
+                raise AssertionError("the confirmation must not be asked here")
+            asked.append(q)
+            return yes_answer
+
+        patches = [mock.patch.object(cli, "yes", fake_yes),
+                   mock.patch.object(cli, "say", lambda *a: None),
+                   mock.patch.object(engine, "claude_session", lambda eid: None)]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        return cli, asked
+
+    def test_off_prompts_on_windows_and_an_aborted_answer_changes_nothing(self):
+        cli, asked = self._cli(yes_answer=False)
+        cli.sandbox_cmd("off")
+        self.assertTrue(asked)                              # the owner was warned and asked
+        self.assertNotIn("sandbox", engine.registry())      # nothing written on a refusal
+        reg = engine.registry()
+        reg["sandbox"] = True
+        engine.save_registry(reg)
+        cli.sandbox_cmd("off")
+        self.assertIs(engine.registry().get("sandbox"), True)   # an aborted downgrade keeps the sandbox
+
+    def test_a_confirmed_off_writes_the_explicit_false(self):
+        cli, _ = self._cli(yes_answer=True)
+        cli.sandbox_cmd("off")
+        self.assertIs(engine.registry().get("sandbox"), False)
+
+    def test_the_yes_flag_skips_the_prompt(self):
+        cli, asked = self._cli(yes_answer=None)
+        cli.sandbox_cmd("off", confirmed=True)
+        self.assertEqual(asked, [])
+        self.assertIs(engine.registry().get("sandbox"), False)
+
+    def test_off_on_a_mac_never_prompts(self):
+        cli, asked = self._cli(yes_answer=None)
+        osinfo.KIND = "mac"
+        cli.sandbox_cmd("off")
+        self.assertEqual(asked, [])
+        self.assertIs(engine.registry().get("sandbox"), False)
+
+    def test_status_names_the_opt_out(self):
+        cli, _ = self._cli(yes_answer=None)
+        osinfo.KIND = "windows"
+        reg = engine.registry()
+        reg["sandbox"] = False
+        engine.save_registry(reg)
+        lines = []
+        with mock.patch.object(cli, "say", lambda m="": lines.append(m)):
+            cli.say_sandbox_status()
+        self.assertTrue(any("off at the owner's choice" in m for m in lines))
+
+    def test_doctor_reports_an_opted_out_mxc_as_the_owners_choice(self):    # T008/T009
+        import mxc as mxc_mod
+        cli = orbit_cli()
+        osinfo.KIND = "windows"
+        reg = engine.registry()
+        reg["sandbox"] = False
+        engine.save_registry(reg)
+        with mock.patch.object(cli, "_win_build", lambda: "10.0.19045"), \
+             mock.patch.object(cli, "service_pythonw", lambda: sys.executable), \
+             mock.patch.object(cli, "sandbox_probe", lambda: {"verdict": "refused"}), \
+             mock.patch.object(mxc_mod, "discover", lambda: {"ok": False, "reason": "the runtime is gone"}):
+            out = cli.windows_checks()
+        self.assertTrue(any(ok and "off at the owner's choice" in m for ok, m, must in out))
+        broken = [m for ok, m, must in out if not ok and must]
+        self.assertFalse(any("wxc-exec" in m or "24H2" in m or "sandbox proof" in m for m in broken),
+                         broken)                            # MXC is informational now, never must-fix
+
+    def test_doctor_still_enforces_mxc_without_the_opt_out(self):
+        import mxc as mxc_mod
+        cli = orbit_cli()
+        osinfo.KIND = "windows"
+        with mock.patch.object(cli, "service_pythonw", lambda: sys.executable), \
+             mock.patch.object(mxc_mod, "discover", lambda: {"ok": False, "reason": "the runtime is gone"}):
+            out = cli.windows_checks()
+        self.assertTrue(any(not ok and must and "wxc-exec" in m for ok, m, must in out),
+                        out)                                # the default keeps MXC must-fix
+
+    def test_setup_choice_defaults_to_no_sandbox_everywhere(self):   # T016: bare Enter = no sandbox
+        cli, asked = self._cli(yes_answer=None)             # no mode confirmation is expected either
+        for kind in ("windows", "mac", "wsl"):
+            osinfo.KIND = kind
+            reg = engine.registry()
+            reg.pop("sandbox", None)
+            engine.save_registry(reg)
+            with mock.patch.object(cli, "yes", lambda q, default=True: default):   # bare Enter
+                cli.setup_sandbox_choice(reg)
+            self.assertIs(engine.registry().get("sandbox"), False, kind)
+            self.assertNotIn("platform", engine.registry(), kind)   # no mode was recorded either
+
+    def test_a_rerun_downgrades_the_sandbox_on_bare_enter(self):    # T016: re-run over "sandbox": true
+        cli, _ = self._cli(yes_answer=None)
+        osinfo.KIND = "windows"
+        reg = engine.registry()
+        reg["sandbox"] = True
+        engine.save_registry(reg)
+        with mock.patch.object(cli, "yes", lambda q, default=True: default):
+            cli.setup_sandbox_choice(reg)
+        self.assertIs(engine.registry().get("sandbox"), False)   # the explicit opt-out, deliberately re-asked
+
+    def test_setup_choice_yes_on_windows_picks_mxc_when_it_passes(self):
+        cli, _ = self._cli(yes_answer=None)
+        osinfo.KIND = "windows"
+        with mock.patch.object(cli, "yes", lambda q, default=True: True), \
+             mock.patch.object(cli, "_win_build", lambda: "10.0.26100"), \
+             mock.patch.object(cli, "sandbox_probe", lambda: {"verdict": "usable"}):
+            import mxc as mxc_mod
+            with mock.patch.object(mxc_mod, "discover", lambda: {"ok": True, "reason": ""}):
+                cli.setup_sandbox_choice(engine.registry())
+        reg = engine.registry()
+        self.assertIs(reg["sandbox"], True)
+        self.assertEqual((reg["platform"]["sandbox_mode"], reg["platform"]["decided_by"]), ("mxc", "owner"))
+
+    def test_setup_choice_yes_offers_wsl2_only_when_mxc_is_broken(self):
+        cli, asked = self._cli(yes_answer=None)
+        osinfo.KIND = "windows"
+        import mxc as mxc_mod
+        modes = []
+        with mock.patch.object(cli, "yes", lambda q, default=True: True), \
+             mock.patch.object(cli, "_win_build", lambda: "10.0.19045"), \
+             mock.patch.object(cli, "sandbox_probe", lambda: {"verdict": "usable"}), \
+             mock.patch.object(mxc_mod, "discover", lambda: {"ok": True, "reason": ""}), \
+             mock.patch.object(osinfo, "which", lambda name: "wsl.exe" if name == "wsl.exe" else None), \
+             mock.patch.object(mxc_mod, "set_mode", lambda m, decided_by="": modes.append(m)):
+            cli.setup_sandbox_choice(engine.registry())
+        self.assertEqual(modes, ["wsl2"])                   # only the available mode was offered, no prompt
+        self.assertEqual(asked, [])
+        self.assertNotIn("sandbox", engine.registry())      # WSL2 mode doesn't set the Windows-side flag
+
+    def test_setup_choice_with_no_mode_available_defaults_to_exiting(self):
+        cli, _ = self._cli(yes_answer=None)
+        osinfo.KIND = "windows"
+        answers = iter([True, False])                       # wants a sandbox; declines running unsandboxed
+
+        def fake_yes(q, default=True):
+            return next(answers)
+
+        with mock.patch.object(cli, "yes", fake_yes), \
+             mock.patch.object(cli, "_win_build", lambda: "10.0.19045"), \
+             mock.patch.object(osinfo, "which", lambda name: None):
+            with self.assertRaises(SystemExit):
+                cli.setup_sandbox_choice(engine.registry())
+        self.assertNotIn("sandbox", engine.registry())      # the refusal changed nothing
+
+    def test_setup_choice_continue_without_a_sandbox_when_asked(self):
+        cli, _ = self._cli(yes_answer=None)
+        osinfo.KIND = "windows"
+        answers = iter([True, True])                        # sandbox yes, "continue unsandboxed?" yes
+
+        def fake_yes(q, default=True):
+            return next(answers)
+
+        with mock.patch.object(cli, "yes", fake_yes), \
+             mock.patch.object(cli, "_win_build", lambda: "10.0.19045"), \
+             mock.patch.object(osinfo, "which", lambda name: None):
+            cli.setup_sandbox_choice(engine.registry())
+        self.assertIs(engine.registry().get("sandbox"), False)   # the explicit opt-out, as everywhere
+
+
 
 class ClaudeAvailability(unittest.TestCase):
     """T004 (FR-001–FR-004): the mandatory Claude check is installation-only. A signed-out client

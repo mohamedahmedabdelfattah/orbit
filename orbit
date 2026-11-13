@@ -21,7 +21,8 @@
   orbit run <handle> "<message>"   one message, one answer, in the terminal
   orbit browser [<handle> [<site> | close | private on|off]]   their own browser window: sign them in there
   orbit browser --install          install the connector their browser windows use (free, ~20 MB)
-  orbit sandbox [on|off]           the optional OS sandbox (off by default; native Windows MXC stays on)
+  orbit sandbox [on|off]           the team sandbox; setup asks, No is the default, `off` on native
+                                   Windows also turns MXC containment off (it asks once, --yes skips)
   orbit secret telegram | slack | discord | apify | anthropic    save a token (typed hidden, stored only on this computer)
   orbit group <chat id> [--channel telegram|slack|discord]      use a group or channel as the team chat
   orbit roles list | save <handle> [title] | export <role> [folder] | import <folder>   roles you can hire from
@@ -304,28 +305,32 @@ def sandbox_switch(target):
 
 
 def windows_checks():
-    """Native Windows mxc-mode checks (R3.3): the machine's MXC side, must-fix at setup; every fix is a
+    """Native Windows mxc-mode checks (R3.3): the machine's MXC side, must-fix at setup — unless the
+    owner opted out of the sandbox ("sandbox": false), then MXC is informational. Every fix is a
     native command, and every fix names both ways out (repair MXC | WSL2 mode, R4.4)."""
     import mxc
     out = []
-    build = _win_build()
-    parts = [p for p in (build.split(".") + ["0", "0"])[:3] if p.isdigit()]
-    ok = tuple(int(p) for p in parts) >= (10, 0, 26100)     # MXC ProcessContainer: updated Windows 11 24H2+
-    out.append((ok, "Windows 11 (updated 24H2 or later)%s" % ("" if ok else
-                ": this is build %s, and Orbit's sandbox needs updated Windows 11 24H2 or newer. On this machine the crew "
-                "runs in WSL2 mode instead (see docs/SETUP.md, 'Windows through WSL')" % (build or "unknown")), True))
+    if engine.registry().get("sandbox") is False:
+        out.append((True, "MXC containment is off at the owner's choice; `orbit sandbox on` restores it", True))
+    else:
+        build = _win_build()
+        parts = [p for p in (build.split(".") + ["0", "0"])[:3] if p.isdigit()]
+        ok = tuple(int(p) for p in parts) >= (10, 0, 26100)     # MXC ProcessContainer: updated Windows 11 24H2+
+        out.append((ok, "Windows 11 (updated 24H2 or later)%s" % ("" if ok else
+                    ": this is build %s, and Orbit's sandbox needs updated Windows 11 24H2 or newer. On this machine the crew "
+                    "runs in WSL2 mode instead (see docs/SETUP.md, 'Windows through WSL')" % (build or "unknown")), True))
+        d = mxc.discover()
+        out.append((d["ok"], "the MXC sandbox runtime (wxc-exec.exe)%s" % (
+            "" if d["ok"] else ": %s. %s" % (d["reason"], MXC_FIX)), True))
+        if d["ok"]:
+            res = sandbox_probe()
+            out.append((res["verdict"] == "usable",
+                        "the sandbox proof (an allowed write succeeds; a write outside the crew member's own "
+                        "folder, a secret read, an unapproved connection and an over-time command each refuse)%s"
+                        % ("" if res["verdict"] == "usable" else ": %s %s" % (mxc.probe_summary(res), MXC_FIX)), True))
     pyw = service_pythonw()
     out.append((bool(pyw and os.path.exists(pyw)), "Python 3 (pythonw.exe runs the service)%s" % (
         "" if pyw and os.path.exists(pyw) else ": reinstall Python, in Windows run  winget install Python.Python.3.12"), True))
-    d = mxc.discover()
-    out.append((d["ok"], "the MXC sandbox runtime (wxc-exec.exe)%s" % (
-        "" if d["ok"] else ": %s. %s" % (d["reason"], MXC_FIX)), True))
-    if d["ok"]:
-        res = sandbox_probe()
-        out.append((res["verdict"] == "usable",
-                    "the sandbox proof (an allowed write succeeds; a write outside the crew member's own "
-                    "folder, a secret read, an unapproved connection and an over-time command each refuse)%s"
-                    % ("" if res["verdict"] == "usable" else ": %s %s" % (mxc.probe_summary(res), MXC_FIX)), True))
     found = osinfo.which("tesseract")
     out.append((bool(found), "tesseract (reading scans and photos)%s" % (
         "" if found else ": setup-windows.ps1 installs it (winget install UB-Mannheim.TesseractOCR)"), False))
@@ -801,6 +806,8 @@ def setup(no_start=False):
     say(("✓ " if ok else "✗ ") + msg)
     if not ok:
         sys.exit(1)
+    ensure_home()
+    setup_sandbox_choice(engine.registry())        # the owner's sandbox choice gates the checks below
     bad = [m for ok, m, must in platform_checks() if must and not ok]
     if bad:
         if osinfo.KIND == "windows" and mxc_mode() != "wsl2":     # R4.4: one owner confirmation, recorded;
@@ -817,7 +824,6 @@ def setup(no_start=False):
                 sys.exit("Fix this first: " + "; ".join(bad))
         else:
             sys.exit("Fix this first: " + "; ".join(bad))
-    ensure_home()
     reg = engine.registry()
     reg["team_name"] = ask("\nYour team or business name", reg.get("team_name") or "My team")
     me = ask("Your first name (how employees will call you)", next(iter(reg.get("owners", {}).values()), {}).get("name", ""))
@@ -1065,32 +1071,108 @@ def browser_cmd(args):
 
 
 def say_sandbox_status():
+    opt_out = engine.registry().get("sandbox") is False
     say("The optional team sandbox is %s. `orbit sandbox %s` turns it %s." % (
         ("on", "off", "off") if engine.sandboxed() else ("off", "on", "on")))
     if osinfo.KIND == "windows" and engine.recorded_sandbox_mode() == "mxc":
-        say("Native Windows MXC containment stays on for every shell command in either setting.")
+        if opt_out:
+            say("MXC containment is off at the owner's choice; `orbit sandbox on` brings it back.")
+        else:
+            say("Native Windows MXC containment stays on for every shell command in either setting.")
 
 
 def sandbox_change_summary(state):
     if state == "on":
         return ("Shell commands reach only the sites you approve and stay out of your Documents, Desktop and "
                 "Downloads; their own browser windows still work.")
-    if osinfo.KIND == "windows" and engine.recorded_sandbox_mode() == "mxc":
-        return ("Native Windows MXC containment stays on for every shell command; the guard still keeps money, "
-                "passwords, your secrets and your own browser off-limits.")
+    if osinfo.KIND == "windows" and engine.recorded_sandbox_mode() == "mxc" \
+            and engine.registry().get("sandbox") is False:
+        return ("MXC containment is off at your choice: their shell commands run with your user's full "
+                "rights; the guard still keeps money, passwords, your secrets and your own browser off-limits.")
     return ("They work on this computer freely, each in its own browser window; the guard still keeps money, "
             "passwords, your secrets and your own browser off-limits.")
 
 
-def sandbox_cmd(state):
-    """Change the optional team sandbox; native-Windows MXC containment remains mandatory."""
+def setup_sandbox_choice(reg):
+    """Setup's sandbox question: on every platform bare Enter means no sandbox (the owner's default),
+    recorded as an explicit "sandbox": false. On Windows, yes offers the available modes only — MXC
+    (build, runtime and probe all pass) or WSL2 (wsl.exe present); a mode is never bootstrapped
+    silently, and sandbox wanted but no mode available still asks before running unsandboxed."""
+    import mxc
+    if osinfo.KIND != "windows":
+        if yes("\nRun the crew in a sandbox? (their shell commands reach only your approved sites and stay "
+               "out of your secrets; Enter = no sandbox)", False):
+            reg["sandbox"] = True
+            engine.save_registry(reg, "setup: sandbox on")
+        else:
+            reg["sandbox"] = False
+            engine.save_registry(reg, "setup: sandbox off")
+        return
+    if mxc.mode() == "wsl2":
+        say("\nThe crew runs in WSL2 mode on this PC: it lives inside the Ubuntu window, and its sandbox "
+            "is managed there. Nothing to choose on the Windows side.")
+        return
+    current = ("MXC containment is on right now" if reg.get("sandbox") is not False
+               else "MXC containment is off right now")
+    if not yes("\nRun the crew in a sandbox? (%s; keeps money, passwords, your secrets and your own "
+               "browser off-limits; Enter = no sandbox)" % current, False):
+        reg["sandbox"] = False
+        engine.save_registry(reg, "setup: sandbox off")
+        return
+    build = _win_build()
+    parts = [p for p in (build.split(".") + ["0", "0"])[:3] if p.isdigit()]
+    mxc_ok = (tuple(int(p) for p in parts) >= (10, 0, 26100) and mxc.discover()["ok"]
+              and sandbox_probe()["verdict"] == "usable")
+    wsl_ok = bool(osinfo.which("wsl.exe"))
+    if not mxc_ok and not wsl_ok:
+        say("No sandbox can run on this Windows yet:")
+        say(MXC_FIX)
+        say("Or install WSL once (`wsl --install`, a restart) and choose WSL2 mode — "
+            "docs/SETUP.md, 'Windows through WSL'.")
+        if not yes("Continue without a sandbox instead? (the crew runs unsandboxed)", False):
+            sys.exit("Set up one of the sandbox ways above, then run `orbit setup` again.")
+        reg["sandbox"] = False
+        engine.save_registry(reg, "setup: sandbox off (no sandbox available)")
+        return
+    if mxc_ok and wsl_ok:
+        use_mxc = yes("Which way? Enter = MXC containment on this Windows; 'n' = WSL2 mode "
+                      "(the whole crew runs inside the Ubuntu window)", True)
+    else:
+        use_mxc = mxc_ok
+        say("Using %s: the only sandbox available here." % ("MXC" if mxc_ok else "WSL2"))
+    if use_mxc:
+        mxc.set_mode("mxc", decided_by="owner")
+        fresh = engine.registry()                        # set_mode just saved the platform: build on it
+        fresh["sandbox"] = True
+        engine.save_registry(fresh, "setup: sandbox on (mxc)")
+        say("MXC containment is on: every shell command runs in its own container. `orbit doctor` verifies it.")
+        return
+    mxc.set_mode("wsl2", decided_by="owner")
+    say("WSL2 mode is recorded as the crew's way on this Windows. Finish the crew side inside WSL:")
+    say("install WSL once (`wsl --install`, a restart), then follow docs/SETUP.md,")
+    say("'Windows through WSL', inside the Ubuntu window — the kit, setup-linux.sh and all.")
+    say("Switching back later:  orbit sandbox mxc")
+
+
+def sandbox_cmd(state, confirmed=False):
+    """Change the team sandbox. `off` means no sandbox on every platform — on native Windows in mxc
+    mode it also disables MXC containment, which is the owner's explicit, confirmed choice (the
+    registry records it as "sandbox": false; the guard stays). An absent key keeps MXC on."""
     if state is None:
         return say_sandbox_status()
     reg = engine.registry()
+    mxc_now = osinfo.KIND == "windows" and engine.recorded_sandbox_mode() == "mxc"
     if state == "on":
         reg["sandbox"] = True
     else:
-        reg.pop("sandbox", None)
+        if mxc_now and not confirmed:
+            say("On this Windows this also turns MXC containment off: the crew's shell commands then run "
+                "with your user's full rights — no container, no egress deny, no filesystem allow-list.")
+            say("The guard still keeps money, passwords, your secrets and your own browser off-limits.")
+            if not yes("Run the crew unsandboxed?", False):
+                say("Nothing changed: MXC containment stays on.")
+                return
+        reg["sandbox"] = False
     engine.save_registry(reg, "sandbox %s" % state)
     for eid, e in reg.get("employees", {}).items():
         if e.get("status") != "retired":
@@ -1138,6 +1220,8 @@ def main():
     bw.add_argument("--install", action="store_true", help="install the connector the browser windows use")
     sb = sub.add_parser("sandbox")
     sb.add_argument("target", nargs="?", choices=["on", "off", "mxc", "wsl2"])
+    sb.add_argument("--yes", action="store_true",
+                    help="on Windows, turn MXC containment off without the confirmation prompt")
     sub.add_parser("desk").add_argument("--show", action="store_true", help="print the link instead of opening it")
     o = sub.add_parser("open")
     o.add_argument("handle"); o.add_argument("--show", action="store_true", help="print the link instead of opening it")
@@ -1168,7 +1252,7 @@ def main():
     if args.cmd == "sandbox":
         if args.target in ("mxc", "wsl2"):
             return sandbox_switch(args.target)
-        return sandbox_cmd(args.target)
+        return sandbox_cmd(args.target, confirmed=args.yes)
     if args.cmd == "demo":
         return demo(stop=args.stop)
     if args.cmd == "start":

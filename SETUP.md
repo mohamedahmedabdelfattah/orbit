@@ -70,7 +70,9 @@ installer/doctor sends older or unsupported builds to the WSL2 fallback below.
    signature verified), and the
    Python packages, your user only. Two to five minutes. It's safe to run again.
 4. Starting the crew: `python <kit>\orbit setup` (it asks their business and bot token in the panel;
-   the checks gate it). If a check fails, `python <kit>\orbit doctor` and fix what it lists, one item
+   the checks gate it). It first asks whether the crew runs in a sandbox — on Windows in MXC by
+   default, or inside WSL2 if you prefer; pressing Enter means no sandbox, which turns MXC
+   containment off. If a check fails, `python <kit>\orbit doctor` and fix what it lists, one item
    at a time — every fix names a Windows command.
 5. Hand over (below).
 

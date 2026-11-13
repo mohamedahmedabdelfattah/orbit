@@ -257,7 +257,8 @@ who don't live in Terminal: every setting is a button or a form.
 An autonomous agent that reads the open web needs locks, not promises. On Mac, Linux and WSL, your crew
 works on your computer freely by default (since 0.13): no OS sandbox boxes them in, so they install what
 they need, run the programs they start and browse in their own windows. Native Windows is the exception:
-MXC contains every shell command even when the optional team-sandbox setting is off. Every run gets:
+MXC contains every shell command by default — `orbit sandbox off` (it asks once) or answering No to
+setup's sandbox question turns that off too. Every run gets:
 
 - **A guard** (a Claude Code hooks module, tested): no money movement, no banking, payment or crypto
   sites, no messages to anyone but you (no email, no raw chat APIs), no reading your secrets, your own
@@ -267,7 +268,8 @@ MXC contains every shell command even when the optional team-sandbox setting is 
   disguising what it runs could get past them. If you'd rather have the wall on Mac, Linux or WSL,
   `orbit sandbox on` brings back the OS sandbox (macOS's own on a Mac; bubblewrap on Linux and in WSL):
   shell commands then reach only the sites you approve and can't read your Documents, Desktop, Downloads
-  or a colleague's folder. Native Windows keeps its MXC wall on in either setting.
+  or a colleague's folder. On native Windows the MXC wall stays on unless you explicitly turned it off
+  (`orbit sandbox off`).
 - **Their own browser window, never yours:** each crew member's Chrome has its own profile. You sign it in
   where it needs to be; it never types a password, and your Chrome, Safari, mail and messages stay yours.
 - **Gateways for the open web:** the page reader, the headless browser, Apify and the watchers enforce their
@@ -340,7 +342,7 @@ orbit chat <h>                   their conversation in a terminal, right here
 orbit inbox [<h>] [--all]        what they said that you haven't seen
 orbit run <h> "message"          one message, one answer, in the terminal
 orbit browser [<h> [site|close|private on|off]]   their own browser window: sign them in there
-orbit sandbox [on|off]           optional OS sandbox (off by default; native Windows MXC stays on)
+orbit sandbox [on|off]           team sandbox (setup asks; `off` also turns native Windows MXC off)
 orbit sandbox mxc|wsl2           Windows containment mode
 orbit secret telegram|slack|discord|apify|anthropic
 orbit group <chat id> [--channel telegram|slack|discord]   the team chat

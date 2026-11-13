@@ -23,7 +23,9 @@ printing the path. Code lives in `core/tools/`; the `bin/staff-*` shims put it o
 ## The security boundary
 
 Since 0.13 employees on Mac, Linux and WSL run without an OS sandbox by default (`orbit sandbox on`
-brings it back). Native Windows always keeps its MXC boundary. With either sandbox boundary active, shell
+brings it back). Native Windows contains every shell command in MXC by default; `orbit sandbox off`
+turns that off too (it asks once, `--yes` skips), and `orbit setup` asks with No as the default. With either
+sandbox boundary active, shell
 commands can reach only the hosts you approve, while `staff-fetch`, `staff-browse`, `staff-apify` and
 `staff-watch` run **outside** it as excluded commands so they can still read the open web. Either way the
 gateways enforce their rules themselves, in code:
