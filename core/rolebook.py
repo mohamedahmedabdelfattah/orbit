@@ -351,7 +351,8 @@ def import_role(path: str = "", data: bytes = None) -> str:
 
 
 def _gh(*args, cwd=None, timeout=120):
-    return subprocess.run(["gh", *args], capture_output=True, text=True, cwd=cwd, timeout=timeout)
+    return subprocess.run(["gh", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          cwd=cwd, timeout=timeout)
 
 
 def publish(rid: str, by: str = "owner") -> dict:

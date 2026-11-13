@@ -74,7 +74,8 @@ def _py_ok(cmd):
     """Can this Python record (soundcard + numpy importable, a sound server there)?"""
     try:
         r = subprocess.run(cmd + ["-c", "import numpy, soundcard; soundcard.default_speaker()"], capture_output=True,
-                           text=True, timeout=30, cwd="/mnt/c" if osinfo.KIND == "wsl" and os.path.isdir("/mnt/c") else None)
+                           text=True, encoding="utf-8", errors="replace", timeout=30,
+                           cwd="/mnt/c" if osinfo.KIND == "wsl" and os.path.isdir("/mnt/c") else None)
     except (OSError, subprocess.TimeoutExpired):
         return False, "timed out"
     return r.returncode == 0, (r.stderr.strip().splitlines() or [""])[-1][:160]
@@ -108,7 +109,8 @@ def ready():
             return False, "Live calls need a sound server (PulseAudio or PipeWire, there on any desktop Linux): %s" % why
         return True, ""
     try:
-        major = int(subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.split(".")[0])
+        major = int(subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace").stdout.split(".")[0])
     except (ValueError, OSError):
         major = 0
     if major and major < 15:
@@ -140,7 +142,8 @@ def listener_app():
     cache = os.path.join(engine.HOME, "cache", "swift-modcache")
     r = subprocess.run([swiftc, "-O", "-module-cache-path", cache, SRC, "-o",
                         os.path.join(app, "Contents", "MacOS", "orbit-listen")],
-                       capture_output=True, text=True, timeout=600, env=dict(os.environ, CLANG_MODULE_CACHE_PATH=cache))
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
+                       env=dict(os.environ, CLANG_MODULE_CACHE_PATH=cache))
     if r.returncode != 0:
         raise CallError("Couldn't build Orbit Listener: %s" % (r.stderr.strip()[-300:] or "swiftc failed"))
     with open(os.path.join(app, "Contents", "Info.plist"), "w") as fh:
@@ -213,7 +216,7 @@ def _whisper(a, prompt=""):
         cmd = [wh, "-m", model, "-l", "auto", "-t", "8", "-np", "-f", wav]
         if prompt:
             cmd += ["--prompt", prompt[-200:]]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     out = []
     for ln in r.stdout.splitlines():
         m = re.match(r"\[(\d\d):(\d\d):(\d\d)\.(\d+) --> [^\]]+\]\s*(.*)", ln)

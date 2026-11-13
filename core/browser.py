@@ -120,7 +120,8 @@ def _revision(path: str) -> int:
 
 def _version(node_path: str) -> tuple:
     try:
-        out = subprocess.run([node_path, "-v"], capture_output=True, text=True, timeout=10).stdout.strip()
+        out = subprocess.run([node_path, "-v"], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=10).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ()
     m = re.match(r"v(\d+)\.(\d+)", out)
@@ -170,7 +171,7 @@ def ready() -> tuple:
 def _env(node_path: str) -> dict:
     env = dict(os.environ)
     env["PATH"] = os.pathsep.join([os.path.dirname(node_path)] + env.get("PATH", "").split(os.pathsep) + osinfo.path_dirs())
-    return env
+    return engine.utf8_env(env)
 
 
 def install(timeout: int = 300) -> str:
@@ -190,7 +191,8 @@ def install(timeout: int = 300) -> str:
             json.dump({"name": "orbit-browser-mcp", "private": True}, fh)
     try:
         r = subprocess.run([npm, "install", "--no-audit", "--no-fund", "--loglevel=error", "%s@%s" % (PKG, PKG_VERSION)],
-                           cwd=MCP_DIR, capture_output=True, text=True, timeout=timeout, env=_env(n))
+                           cwd=MCP_DIR, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, env=_env(n))
     except (OSError, subprocess.TimeoutExpired) as e:
         raise BrowserError("couldn't install the browser connector: %s" % e)
     if installed() != PKG_VERSION:
@@ -352,7 +354,8 @@ def _main_pid(emp_id: str) -> int:
     flag = "--user-data-dir=" + profile(emp_id)
     pid = _state(emp_id).get("pid") or 0
     try:
-        rows = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True, timeout=10).stdout
+        rows = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=10).stdout
     except (OSError, subprocess.TimeoutExpired):
         return 0
     mains = []

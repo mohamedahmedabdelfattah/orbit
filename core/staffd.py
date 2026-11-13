@@ -210,7 +210,8 @@ def handle(msg):
             return
         threading.Thread(target=lambda: send(chat, call_reply(act, emp_id, who, body), emp), daemon=True).start()
         return
-    env_ws = dict(os.environ, STAFF_WORKSPACE=emp["workspace"], STAFF_EMPLOYEE=emp_id, STAFFROOM_HOME=engine.HOME)
+    env_ws = engine.utf8_env(dict(os.environ, STAFF_WORKSPACE=emp["workspace"], STAFF_EMPLOYEE=emp_id,
+                                  STAFFROOM_HOME=engine.HOME))
     inbox = os.path.join(emp["workspace"], "state", "inbox")
     atts = msg.get("attachments") or []
     media = next((a for a in atts if a["kind"] in ("voice", "audio", "video", "video_note")), None)
@@ -232,7 +233,8 @@ def handle(msg):
 
         def meet():
             r = subprocess.run([sys.executable, os.path.join(CORE, "tools", "meeting.py"), p, "--title", body or "meeting"],
-                               capture_output=True, text=True, env=env_ws, timeout=7200)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               env=env_ws, timeout=7200)
             try:
                 info = json.loads(r.stdout.strip().splitlines()[-1])
                 minutes(emp_id, info, who, body or "meeting")
@@ -251,7 +253,8 @@ def handle(msg):
             send(chat, "I couldn't download that voice note. Please type it.", emp)
             return
         r = subprocess.run([sys.executable, os.path.join(CORE, "tools", "transcribe.py"), p],
-                           capture_output=True, text=True, timeout=600)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
+                           env=engine.utf8_env(dict(os.environ)))
         said = r.stdout.strip()
         if not said:
             send(chat, "I couldn't transcribe that voice note (%s). Please type it." % (r.stderr.strip()[-120:] or "no speech found"), emp)

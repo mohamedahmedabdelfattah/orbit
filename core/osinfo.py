@@ -280,7 +280,8 @@ def win_path(p: str) -> str:
     Windows path already is one."""
     if KIND == "windows":
         return p
-    r = subprocess.run(["wslpath", "-w", p], capture_output=True, text=True, timeout=10)
+    r = subprocess.run(["wslpath", "-w", p], capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=10)
     if r.returncode != 0 or not r.stdout.strip():
         raise OSError("wslpath couldn't convert %s" % p)
     return r.stdout.strip()
@@ -292,7 +293,8 @@ def win_env(name: str) -> str:
         return os.environ.get(name, "")
     exe = which("cmd.exe") or "/mnt/c/Windows/System32/cmd.exe"
     try:
-        r = subprocess.run([exe, "/c", "echo %" + name + "%"], capture_output=True, text=True, timeout=15,
+        r = subprocess.run([exe, "/c", "echo %" + name + "%"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=15,
                            cwd="/mnt/c" if os.path.isdir("/mnt/c") else None)
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -301,7 +303,8 @@ def win_env(name: str) -> str:
 
 
 def lin_path(winp: str) -> str:
-    r = subprocess.run(["wslpath", "-u", winp], capture_output=True, text=True, timeout=10)
+    r = subprocess.run(["wslpath", "-u", winp], capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=10)
     return r.stdout.strip()
 
 
@@ -316,7 +319,8 @@ def win_python():
             continue
         try:   # the Microsoft Store's python.exe stub prints nothing useful and exits non-zero
             r = subprocess.run([exe] + c[1:] + ["-c", "import sys; print(sys.version_info[0])"],
-                               capture_output=True, text=True, timeout=20, cwd="/mnt/c" if os.path.isdir("/mnt/c") else None)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
+                               cwd="/mnt/c" if os.path.isdir("/mnt/c") else None)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if r.returncode == 0 and r.stdout.strip() == "3":

@@ -160,7 +160,8 @@ def _spawn_executor(args, env=None, timeout=None):
     """The one place an executor launch happens (fakeable; T002). Never --audit/--debug on real runs."""
     if SPAWN is not None:
         return SPAWN(args=args, env=env, timeout=timeout)
-    return subprocess.run([a for a in args if a], capture_output=True, text=True, env=env, timeout=timeout)
+    return subprocess.run([a for a in args if a], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", env=env, timeout=timeout)
 
 
 def ran(args, timeout=60):

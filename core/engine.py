@@ -274,8 +274,10 @@ def claude_availability() -> dict:
         return {"state": "missing",
                 "detail": "Claude Code isn't installed. Install it from https://claude.com/claude-code, then try again."}
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    utf8_env(env)
     try:
-        r = subprocess.run([c, "--version"], capture_output=True, text=True, timeout=90, env=env)
+        r = subprocess.run([c, "--version"], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=90, env=env)
     except (OSError, ValueError):
         r = None
     if r is None or r.returncode != 0:
@@ -365,11 +367,19 @@ def launch_policy(kind: str, emp: dict = None) -> dict:
         _employee_runtime(emp, env)
     if legacy and kind in ("employee", "onboarding"):    # inference only; plugin administration never sees the key
         env["ANTHROPIC_API_KEY"] = secret("anthropic_api_key")
+    utf8_env(env)
     if legacy:
         sources = "project" if kind == "employee" else ("" if kind == "onboarding" else None)
     else:
         sources = {"employee": "user,project", "onboarding": "user", "plugin": None}[kind]
     return {"mode": "legacy" if legacy else "ordinary", "env": env, "setting_sources": sources}
+
+
+def utf8_env(env: dict) -> dict:
+    """Windows hardening: children that are Python write UTF-8 to their pipes instead of the
+    cp1252 locale (the parent decodes UTF-8; see the subprocess calls). Never overrides the owner."""
+    env.setdefault("PYTHONUTF8", "1")
+    return env
 
 
 def clean_env(emp: dict) -> dict:
@@ -473,7 +483,7 @@ def _make_skill_link(source: str, path: str):
         return
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     made = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", path, source],
-                          capture_output=True, text=True, creationflags=flags)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=flags)
     if made.returncode != 0:
         why = (made.stderr or made.stdout or "Windows could not create the directory junction").strip()
         raise OSError(why)
@@ -587,7 +597,8 @@ def stream(cmd: list, prompt: str, ws: str, env: dict, timeout: int, on_step=Non
     import steps as steps_mod
     t0, steps, result, killed, said = time.time(), [], None, [], []
     errf = tempfile.TemporaryFile()
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True, cwd=ws, env=env)
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errf, text=True,
+                         encoding="utf-8", errors="replace", cwd=ws, env=env)
     import awake                                           # the computer stays up until this run ends
     awake.hold(p.pid)
 
@@ -988,7 +999,8 @@ def claude_session(emp_id: str) -> dict:
                  [["plugin", "marketplace", "update", "orbit"], ["plugin", "update", "staff-guard@orbit", "--scope", "local"]])
         for args in steps:
             try:
-                r = subprocess.run([resolve_claude()] + args, cwd=ws, capture_output=True, text=True, timeout=120, env=env_cli)
+                r = subprocess.run([resolve_claude()] + args, cwd=ws, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=120, env=env_cli)
             except (OSError, subprocess.TimeoutExpired) as e:
                 raise RuntimeError("couldn't run Claude Code to add the guard (%s). Is it installed? `orbit doctor`" % e)
             if r.returncode != 0 and not re.search(r"already|up to date|latest", r.stdout + r.stderr, re.I):

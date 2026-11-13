@@ -83,7 +83,8 @@ def _ask(system, prompt, schema, timeout=150):
     cmd = [engine.resolve_claude(), "-p", "--model", "sonnet", "--effort", "low", "--tools", "",
            "--no-session-persistence", "--setting-sources", sources, "--strict-mcp-config", "--output-format", "json",
            "--system-prompt", system, "--json-schema", json.dumps(schema)]
-    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=engine.HOME, env=env)
+    r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       timeout=timeout, cwd=engine.HOME, env=env)
     try:
         d = json.loads(r.stdout)
     except ValueError:
