@@ -20,11 +20,16 @@ TMP = tempfile.mkdtemp(prefix="staffroom-test-")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cleanup  # noqa: E402
 _cleanup.on_exit(TMP)                      # nothing left behind: temp folders, transcripts
+
+
+def load_tests(loader, tests, pattern):
+    return _cleanup.home_suite(tests, TMP)
 os.environ["STAFFROOM_HOME"] = TMP
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(KIT, "core"))
 sys.path.insert(0, os.path.join(KIT, "core", "tools"))
 sys.path.insert(0, os.path.join(KIT, "tests"))
+_cleanup.home(TMP)                          # now too: named-class loads skip load_tests
 
 import abilities  # noqa: E402
 import engine  # noqa: E402
@@ -35,7 +40,6 @@ import osinfo  # noqa: E402
 import team  # noqa: E402
 
 RUNS = []                                  # employee runs the code asked for; tests never start Claude
-team.run_async = lambda *a, **k: RUNS.append((a, k))
 
 
 def fresh_team():
@@ -121,6 +125,11 @@ class Orders(unittest.TestCase):
     def setUp(self):
         fresh_team()
         hire.hire("Tess", "Research", supervisor="Alex")
+        self.real_run_async = team.run_async
+        team.run_async = lambda *a, **k: RUNS.append((a, k))     # never a real routine from a test
+
+    def tearDown(self):
+        team.run_async = self.real_run_async
 
     def test_super_agent_and_back(self):
         out = orders.execute("Alex", "set_abilities", {"employee_id": "tess", "preset": "super"})
@@ -1057,8 +1066,13 @@ class Onboarding(unittest.TestCase):
         shutil.rmtree(TMP, ignore_errors=True)
         os.makedirs(os.path.join(TMP, "team"))
         engine.save_registry({"team_name": "My team", "owners": {}, "employees": {}, "panel": {"port": 7398}})
+        self.real_run_async = team.run_async
+        team.run_async = lambda *a, **k: RUNS.append((a, k))     # never a real routine from a test
         import panel
         self.panel = panel
+
+    def tearDown(self):
+        team.run_async = self.real_run_async
 
     def test_welcome_hire_connect_pair(self):
         import channels

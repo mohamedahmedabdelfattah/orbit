@@ -29,15 +29,20 @@ TMP = tempfile.mkdtemp(prefix="staff-tools-test-")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cleanup  # noqa: E402
 _cleanup.on_exit(TMP)                      # nothing left behind: temp folders, transcripts
+
+
 HOME = os.path.join(TMP, "home")
 WS = os.path.join(TMP, "workspace")
 os.makedirs(HOME)
 os.makedirs(WS)
-os.environ.pop("STAFF_EMPLOYEE", None)
 os.environ["STAFFROOM_HOME"] = HOME
-os.environ["STAFF_WORKSPACE"] = WS
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
+_cleanup.home(HOME)                         # now too: named-class loads skip load_tests
+
+
+def load_tests(loader, tests, pattern):
+    return _cleanup.home_suite(tests, HOME, env={"STAFF_WORKSPACE": WS})
 
 TOOL_DEPS_ERROR = ""
 try:

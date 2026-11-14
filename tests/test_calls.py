@@ -16,10 +16,15 @@ TMP = tempfile.mkdtemp(prefix="orbit-calls-test-")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cleanup  # noqa: E402
 _cleanup.on_exit(TMP)                      # nothing left behind: temp folders, transcripts
+
+
+def load_tests(loader, tests, pattern):
+    return _cleanup.home_suite(tests, TMP)
 os.environ["STAFFROOM_HOME"] = TMP
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(KIT, "core"))
 sys.path.insert(0, os.path.join(KIT, "core", "tools"))
+_cleanup.home(TMP)                          # now too: named-class loads skip load_tests
 
 import calls  # noqa: E402
 import engine  # noqa: E402
@@ -29,8 +34,7 @@ import osinfo  # noqa: E402
 import staffd  # noqa: E402
 import team  # noqa: E402
 
-RUNS = []
-team.run_async = lambda *a, **k: RUNS.append((a, k))
+RUNS = []                                  # the demo call's run_async orders; tests never start Claude
 
 
 def tone(seconds, amp=0.2):
@@ -142,10 +146,13 @@ class DemoCall(unittest.TestCase):
         engine.save_registry({"team_name": "Test", "owners": {"111": {"name": "Alex"}}, "employees": {},
                               "defaults": {"model": "sonnet"}, "panel": {"port": 7397}})
         self.eid = hire.hire("Lina", "Call notes", "Minutes from calls", supervisor="Alex", picked=["meetings", "telegram"])
+        self.real_run_async = team.run_async
+        team.run_async = lambda *a, **k: RUNS.append((a, k))     # never a real routine from a test
         os.environ["STAFFROOM_DEMO"] = "1"
         RUNS.clear()
 
     def tearDown(self):
+        team.run_async = self.real_run_async
         os.environ.pop("STAFFROOM_DEMO", None)
         for eid in list(calls.CALLS):
             calls.stop(eid)

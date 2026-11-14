@@ -20,10 +20,15 @@ TMP = tempfile.mkdtemp(prefix="orbit-platforms-test-")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _cleanup  # noqa: E402
 _cleanup.on_exit(TMP)                      # nothing left behind: temp folders, transcripts
+
+
+def load_tests(loader, tests, pattern):
+    return _cleanup.home_suite(tests, TMP)
 os.environ["STAFFROOM_HOME"] = TMP
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(KIT, "core"))
 sys.path.insert(0, os.path.join(KIT, "core", "tools"))
+_cleanup.home(TMP)                          # now too: named-class loads skip load_tests
 
 import calls  # noqa: E402
 import engine  # noqa: E402

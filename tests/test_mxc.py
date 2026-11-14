@@ -24,7 +24,12 @@ import engine  # noqa: E402
 import mxc  # noqa: E402
 import osinfo  # noqa: E402
 
+_cleanup.home(TMP)                          # now too: named-class loads skip load_tests
 _cleanup.on_exit(TMP)
+
+
+def load_tests(loader, tests, pattern):
+    return _cleanup.home_suite(tests, TMP)
 
 
 def set_kind(kind):
