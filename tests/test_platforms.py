@@ -398,6 +398,37 @@ class NativeService(unittest.TestCase):
         self.assertEqual([s for s in scripts if "GetFolderPath('Startup')" in s], [])
         self.assertTrue(any("existing one" in line for line in said), said)
 
+    def test_stop_says_so_when_the_task_survives_the_unregister(self):
+        """A denied unregister used to print plain 'Stopped.' — the crew's autostart silently stayed."""
+        scripts, said = [], []
+        with mock.patch.object(self.cli, "win_ps", side_effect=self._fake_ps(scripts, task_exists="yes")), \
+                mock.patch.object(self.cli, "stop_service_run"), \
+                mock.patch.object(self.cli, "service_pid", return_value=None), \
+                mock.patch.object(self.cli, "say", side_effect=said.append):
+            self.cli.stop()
+        self.assertTrue(any("still registered" in line for line in said), said)
+
+    def test_stop_warns_when_a_watchdog_survives(self):
+        said = []
+        with mock.patch.object(self.cli, "win_ps", side_effect=self._fake_ps([], task_exists="no")), \
+                mock.patch.object(self.cli, "stop_service_run"), \
+                mock.patch.object(self.cli, "service_pid", return_value=4242), \
+                mock.patch.object(self.cli, "say", side_effect=said.append):
+            self.cli.stop()
+        warn = next(line for line in said if "still alive" in line)
+        self.assertIn("4242", warn)
+        self.assertIn("taskkill /PID 4242 /T /F", warn)
+
+    def test_stop_is_quiet_when_everything_really_stopped(self):
+        said = []
+        with mock.patch.object(self.cli, "win_ps", side_effect=self._fake_ps([], task_exists="no")), \
+                mock.patch.object(self.cli, "stop_service_run"), \
+                mock.patch.object(self.cli, "service_pid", return_value=None), \
+                mock.patch.object(self.cli, "say", side_effect=said.append):
+            self.cli.stop()
+        self.assertTrue(any("Stopped." in line for line in said))
+        self.assertFalse(any("But the" in line for line in said), said)
+
     @unittest.skipUnless(os.name == "nt", "signal names are platform state")
     def test_service_run_uses_this_platforms_path_separator(self):
         """service_run once joined PATH with ':' — POSIX-only — so the service's whole environment had

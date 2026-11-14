@@ -402,6 +402,13 @@ def stop():
     else:
         stop_service_run()
     say("Stopped. `orbit start` to bring the team back.")
+    if osinfo.KIND == "windows" and win_task_exists():
+        say("But the scheduled task 'Orbit' is still registered — removing it needs an elevated window. "
+            "Run `orbit stop` again from an elevated PowerShell, or unregister the task there.")
+    pid = service_pid()
+    if pid:
+        how = "taskkill /PID %d /T /F" % pid if osinfo.KIND == "windows" else "kill %d" % pid
+        say("But the service watchdog (pid %d) is still alive, so the crew keeps running. End it with: %s" % (pid, how))
     try:
         import cloud
         on = [k for k in engine.registry().get("employees", {}) if cloud.is_on(k)]
