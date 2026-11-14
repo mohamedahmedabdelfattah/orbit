@@ -1245,6 +1245,8 @@ def main():
     s.add_argument("name", choices=sorted(SECRET_NAMES))
     g = sub.add_parser("group")
     g.add_argument("chat_id"); g.add_argument("--channel", choices=["telegram", "slack", "discord"])
+    un = sub.add_parser("uninstall")                     # stop the crew, take it all back out
+    un.add_argument("--all", action="store_true", help="remove all data without asking (the kit folder stays)")
     args = ap.parse_args()
 
     if args.cmd in (None, "help"):
@@ -1306,6 +1308,9 @@ def main():
         return
     if args.cmd == "stop":
         return stop()
+    if args.cmd == "uninstall":
+        import uninstall
+        return uninstall.run(args)
     if args.cmd == "restart":
         stop()
         return start()

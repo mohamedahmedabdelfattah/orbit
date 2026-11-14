@@ -346,6 +346,8 @@ orbit sandbox [on|off]           team sandbox (setup asks; `off` also turns nati
 orbit sandbox mxc|wsl2           Windows containment mode
 orbit secret telegram|slack|discord|apify|anthropic
 orbit group <chat id> [--channel telegram|slack|discord]   the team chat
+orbit uninstall [--all]          stop the crew, take the service/shims back out, choose what data to keep
+                                 (--all removes all data without asking; the kit folder is never auto-removed)
 ```
 
 ## Requirements
