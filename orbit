@@ -461,7 +461,8 @@ def stop_service_run():
     if osinfo.KIND == "windows":
         # os.kill is a hard TerminateProcess here and orphans the staffd child (two instances then
         # fight over the chat channels): taskkill's tree kill takes the watchdog and its children.
-        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     else:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -556,8 +557,10 @@ def win_ps(script):
     import base64
     exe = osinfo.which("powershell.exe") or "powershell.exe"
     enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    # hidden even when this runs windowless (an update restart): no black console flash
     return subprocess.run([exe, "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, timeout=60,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def service_pythonw():

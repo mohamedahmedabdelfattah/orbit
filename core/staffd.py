@@ -577,7 +577,22 @@ def tick_share():
         osinfo.notify("Orbit", "Share what %s learned?" % e["name"])
 
 
+def hide_windows():
+    """The service runs under pythonw (no console): on Windows every console child would otherwise
+    pop its own black command-prompt window — one per git, claude or powershell call, visible on
+    every panel action. Default every child to no window; deliberate ones (open_terminal) pass
+    creationflags themselves."""
+    if os.name != "nt":
+        return
+    popen = subprocess.Popen
+    def hidden(*args, **kwargs):
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+        return popen(*args, **kwargs)
+    subprocess.Popen = hidden
+
+
 def main():
+    hide_windows()
     os.makedirs(team.TEAM, exist_ok=True)
     log("staffd up (pid %d)" % os.getpid())
     import awake

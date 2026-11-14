@@ -909,6 +909,35 @@ class Panel(unittest.TestCase):
         self.assertEqual(self.req("/api/skill?emp=nobody&where=own&name=x", headers=self.auth())[0], 404)
 
 
+class ServiceWindows(unittest.TestCase):
+    """The service runs under pythonw (no console): every console child must default to no window,
+    or the owner sees a black command prompt flash on every panel action and screen switch."""
+
+    def test_children_spawn_without_console_windows(self):
+        import staffd
+        real, seen = subprocess.Popen, []
+
+        def recorder(*a, **kw):
+            seen.append(kw.get("creationflags"))
+            return real(*a, **kw)
+
+        subprocess.Popen = recorder
+        try:
+            staffd.hide_windows()
+            if os.name != "nt":
+                return                                 # pythonw is a Windows story
+            r = subprocess.run([sys.executable, "-c", "print('ok')"], capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), "ok")
+            self.assertEqual(seen[-1], subprocess.CREATE_NO_WINDOW)
+            p = subprocess.Popen([sys.executable, "-c", "print('p')"], stdout=subprocess.PIPE,
+                                 creationflags=subprocess.BELOW_NORMAL_PRIORITY_CLASS)
+            out = p.communicate()[0].decode().strip()
+            self.assertEqual(out, "p")
+            self.assertEqual(seen[-1], subprocess.BELOW_NORMAL_PRIORITY_CLASS)   # deliberate flags win
+        finally:
+            subprocess.Popen = real
+
+
 class Channels(unittest.TestCase):
     def setUp(self):
         fresh_team()
