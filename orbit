@@ -137,10 +137,55 @@ def claude_status():
     return a["state"] == "available", a["detail"]
 
 
+def claude_env():
+    """The env block of Claude's own settings (~/.claude/settings.json): the crew's runs share
+    it, so a model server or model name pinned there is the crew's too."""
+    try:
+        with open(os.path.expanduser("~/.claude/settings.json"), encoding="utf-8") as fh:
+            return (json.load(fh).get("env") or {})
+    except (OSError, ValueError):
+        return {}
+
+
+def model_server_check():
+    """When Claude (and so the crew) runs through a model server (ANTHROPIC_BASE_URL in Claude's
+    settings), ping each pinned model for one token: a model the server doesn't have loaded
+    answers HTTP 404 in seconds and every crew run dies with it."""
+    env = claude_env()
+    base = (env.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/")
+    if not base:
+        return (True, "Claude runs direct from Anthropic (no model server to check)", False)
+    names = sorted({env.get(k) or "" for k in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                                               "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL")} - {""})
+    if not names:
+        return (True, "Claude runs through a model server (%s): no model names pinned there" % base, False)
+    import urllib.error
+    token = env.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_API_KEY") or ""
+    dead = []
+    for name in names:
+        body = json.dumps({"model": name, "max_tokens": 1, "messages": [{"role": "user", "content": "ping"}]}).encode()
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        try:
+            urllib.request.urlopen(urllib.request.Request(base + "/v1/messages", data=body, headers=headers),
+                                   timeout=30)
+        except urllib.error.HTTPError as e:
+            dead.append("%s answered HTTP %s%s" % (name, e.code, " — not loaded on that server?" if e.code == 404 else ""))
+        except Exception as e:  # noqa: BLE001
+            dead.append("%s unreachable (%s)" % (name, str(e)[:80]))
+    if dead:
+        return (False, "Claude model server %s: %s. The crew's runs share this setting — load the model "
+                "on the server, or point Claude's settings env at a model it has loaded."
+                % (base, "; ".join(dead)), True)
+    return (True, "Claude model server %s answers for %s" % (base, ", ".join(names)), False)
+
+
 def checks():
     out = []
     ok, msg = claude_status()
     out.append((ok, msg, True))
+    out.append(model_server_check())
     out.extend(platform_checks())
     out.append((bool(shutil.which("git")), "git", True))
     import browser

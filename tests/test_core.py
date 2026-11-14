@@ -277,8 +277,9 @@ class ProviderNeutralRun(unittest.TestCase):
 
 class Diagnostics(unittest.TestCase):
     """T018 (FR-015, FR-016, FR-020, SC-009): every real Claude failure class keeps its own process
-    result and classification while owner-facing wording stays provider-neutral — no generic
-    account-login prescription, no guessed provider details."""
+    result and classification while Orbit's own wording stays provider-neutral — no generic
+    account-login prescription, no guessed provider details. On top of that, the owner's rule:
+    the real error always reaches the owner (sanitized: paths to ~, tokens redacted)."""
 
     CASES = {
         "rate-limit": "Claude AI usage limit reached. Please try again later.",
@@ -289,14 +290,34 @@ class Diagnostics(unittest.TestCase):
         "unknown": "kaboom",
     }
 
-    def test_owner_wording_is_provider_neutral_for_every_failure_class(self):
+    def test_orbits_own_wording_is_provider_neutral_for_every_failure_class(self):
         for name, err in self.CASES.items():
-            for text in (engine.friendly_error(err), engine.why_failed(err)):
-                low = text.lower()
-                for banned in ("auth login", "log in", "login", "sign in", "anthropic", "api key",
-                               "subscription", "api.anthropic.com"):
-                    self.assertNotIn(banned, low, "%s wording: %r" % (name, text))
-                self.assertTrue(text.strip(), name)
+            low = engine.failure_class(err).lower()
+            for banned in ("auth login", "log in", "login", "sign in", "anthropic", "api key",
+                           "subscription", "api.anthropic.com"):
+                self.assertNotIn(banned, low, "%s wording: %r" % (name, low))
+            self.assertTrue(low.strip(), name)
+
+    def test_the_real_error_reaches_the_owner_sanitized(self):
+        for name, err in self.CASES.items():
+            self.assertIn(err, engine.friendly_error(err), name)     # the actual cause, verbatim
+        self.assertIn("kaboom", engine.why_failed("kaboom"))         # the team room names it too
+
+    def test_sanitize_hides_paths_and_tokens_but_keeps_the_cause(self):
+        err = ("Error at C:\\Users\\Mohamed\\Staff\\employees\\ziad\\state\\runs.jsonl: "
+               "token sk-abc123456789xyz rejected; bearer sk-unsloth-ffffffffffffffff")
+        out = engine.sanitize_error(err)
+        self.assertIn("~/Staff/employees/ziad/state/runs.jsonl", out.replace("\\", "/"))   # home path, readable
+        self.assertNotIn("Mohamed", out)                                 # no home folder name
+        self.assertNotIn("sk-abc123456789xyz", out)                      # no token values
+        self.assertEqual(out.count("[redacted]"), 2)
+        self.assertIn("token [redacted] rejected", out)
+
+    def test_long_errors_are_capped_to_one_line(self):
+        out = engine.sanitize_error("a\nb\tc  " + "x" * 500)
+        self.assertNotIn("\n", out)
+        self.assertLessEqual(len(out), 241)
+        self.assertTrue(out.endswith("…"))
 
     def test_failure_classes_keep_their_distinct_plain_reason(self):
         self.assertIn("usage limit", engine.friendly_error(self.CASES["rate-limit"]))

@@ -364,8 +364,12 @@ def run_async(emp_id, prompt, job, session_key, deliver_to, who="", on_done=None
                 res = engine.run(emp, prompt, job=job, session_key=session_key, extra_env=extra_env, on_step=on_step,
                                  timeout=3600 if job in LONG_JOBS else 1800)
             except Exception:  # noqa: BLE001
-                log("run error %s/%s: %s" % (emp_id, job, traceback.format_exc()[-400:]))
-                res = {"ok": False, "text": "Something went wrong on my side (logged).", "error": "crash"}
+                tb = traceback.format_exc()
+                log("run error %s/%s: %s" % (emp_id, job, tb[-400:]))
+                res = {"ok": False,
+                       "text": "Something went wrong on my side. Claude reported: %s"
+                               % engine.sanitize_error(tb.strip().splitlines()[-1] if tb.strip() else "unknown crash"),
+                       "error": "crash"}
             finally:
                 DOING.pop(emp_id, None)
                 LIVE.pop(emp_id, None)

@@ -504,6 +504,79 @@ class NativeService(unittest.TestCase):
         self.assertIn(r.returncode, (0, 1))
 
 
+class ModelServerCheck(unittest.TestCase):
+    """The doctor row for a routed Claude: the crew shares the owner's model server, so a model
+    that isn't loaded there must be named (it kills every crew run in seconds). All network
+    is faked; the token never appears in any message."""
+
+    def setUp(self):
+        self.cli = orbit_cli()
+
+    ENV = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8888",
+           "ANTHROPIC_MODEL": "Qwen3.6-35B-A3B-MTP-GGUF",
+           "ANTHROPIC_DEFAULT_OPUS_MODEL": "Qwen3.6-35B-A3B-MTP-GGUF",
+           "ANTHROPIC_DEFAULT_SONNET_MODEL": "Ornith-1.5-9B-GGUF",
+           "ANTHROPIC_AUTH_TOKEN": "sk-test-secret-000"}
+
+    class _Answer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def test_direct_claude_has_nothing_to_check(self):
+        with mock.patch.object(self.cli, "claude_env", return_value={}):
+            ok, msg, must = self.cli.model_server_check()
+        self.assertTrue(ok)
+        self.assertIn("direct", msg)
+        self.assertFalse(must)
+
+    def test_an_unloaded_model_is_named_as_the_crew_killer(self):
+        import urllib.error
+
+        def fake_urlopen(request, timeout=0):
+            raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(b""))
+        with mock.patch.object(self.cli, "claude_env", return_value=dict(self.ENV)), \
+                mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok, msg, must = self.cli.model_server_check()
+        self.assertFalse(ok)
+        self.assertTrue(must)
+        self.assertIn("Qwen3.6-35B-A3B-MTP-GGUF", msg)
+        self.assertIn("404", msg)
+        self.assertNotIn("sk-test-secret-000", msg)          # the token stays out of messages
+
+    def test_a_loaded_model_passes(self):
+        def fake_urlopen(request, timeout=0):
+            return self._Answer()
+        with mock.patch.object(self.cli, "claude_env", return_value=dict(self.ENV)), \
+                mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ok, msg, must = self.cli.model_server_check()
+        self.assertTrue(ok)
+        self.assertIn("Qwen3.6-35B-A3B-MTP-GGUF", msg)
+        self.assertIn("Ornith-1.5-9B-GGUF", msg)
+        self.assertFalse(must)
+
+    def test_an_unreachable_server_is_a_must_fix_too(self):
+        with mock.patch.object(self.cli, "claude_env", return_value=dict(self.ENV)), \
+                mock.patch("urllib.request.urlopen",
+                           side_effect=OSError("connection refused")):
+            ok, msg, must = self.cli.model_server_check()
+        self.assertFalse(ok)
+        self.assertTrue(must)
+        self.assertIn("unreachable", msg)
+
+    def test_no_model_names_pinned_is_not_a_failure(self):
+        env = dict(self.ENV)
+        for k in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                  "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
+            env.pop(k, None)
+        with mock.patch.object(self.cli, "claude_env", return_value=env):
+            ok, msg, must = self.cli.model_server_check()
+        self.assertTrue(ok)
+        self.assertIn("no model names pinned", msg)
+
+
 class Documents(unittest.TestCase):
     def setUp(self):
         import docs

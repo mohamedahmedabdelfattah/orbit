@@ -568,21 +568,44 @@ NETWORK = re.compile(
     r"connection refused|connection reset|temporarily unavailable", re.I)
 
 
-def friendly_error(err: str) -> str:
-    """Owner-facing wording for a failed run: the failure class in plain words, never a provider name,
-    an install-time account status, or a guessed provider detail (FR-015)."""
+def failure_class(err: str) -> str:
+    """The failure class in plain, provider-neutral words (FR-015): no provider name, no
+    install-time account status, no guessed provider detail."""
     if re.search(r"usage limit|rate limit|limit reached", err, re.I):
         return "I've hit the Claude usage limit; I'll pick this up after it resets. Nothing is lost."
     if re.search(r"authenticate|OAuth|not logged in|log in", err, re.I):
         return "I couldn't authenticate with Claude on this computer. Owner: check the Claude connection on this PC."
     if NETWORK.search(err):
         return "I couldn't reach Claude: this computer looks asleep or offline. Send it again when it's back."
-    return "Something went wrong on my side (logged). Please resend."
+    return "Something went wrong on my side. Please resend."
+
+
+def sanitize_error(err: str) -> str:
+    """One owner-safe line from a raw error: home paths become ~, token-shaped strings are
+    redacted. The owner wants the real error always — but never a secret."""
+    s = re.sub(r"\s+", " ", str(err)).strip()
+    home = os.path.expanduser("~")
+    for h in {home, home.replace("\\", "/")}:
+        if h and h != "~":
+            s = s.replace(h, "~")
+    s = re.sub(r"\b(sk-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+               r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b", "[redacted]", s)
+    s = re.sub(r"(?i)((?:authorization|api[_-]?key)[:=]\s*)(bearer\s+)?\S+", r"\1[redacted]", s)
+    return s[:240] + ("…" if len(s) > 240 else "")
+
+
+def friendly_error(err: str) -> str:
+    """Owner-facing wording for a failed run: the failure class in plain words, then the real
+    error, sanitized, so the panel always names the actual cause (the owner's rule: the real
+    error, always, unless it carries secrets)."""
+    detail = sanitize_error(err)
+    base = failure_class(err)
+    return "%s — Claude reported: %s" % (base, detail) if detail else base
 
 
 def why_failed(err: str) -> str:
-    """The reason a routine didn't run, in a few plain words (for the team room). Provider-neutral: it
-    names the failure class, not a provider or an account to set up (FR-015)."""
+    """The reason a routine didn't run, in a few plain words (for the team room). The failure
+    class first, then a short sanitized version of the real error."""
     if NETWORK.search(err):
         return "this computer was asleep or offline when it was due"
     if re.search(r"usage limit|rate limit|limit reached", err, re.I):
@@ -591,7 +614,8 @@ def why_failed(err: str) -> str:
         return "I couldn't authenticate with Claude on this computer"
     if re.search(r"timed out", err, re.I):
         return "it ran out of time"
-    return "an error on my side (logged)"
+    detail = sanitize_error(err)[:120]
+    return ("an error on my side: %s" % detail) if detail else "an error on my side"
 
 
 def stream(cmd: list, prompt: str, ws: str, env: dict, timeout: int, on_step=None):
